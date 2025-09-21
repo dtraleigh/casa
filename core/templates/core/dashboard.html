@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+
+{% block title %}Dashboard - Casa{% endblock %}
+
+{% block content %}
+<!-- Main Content Area -->
+<div class="container py-4">
+    <div class="row justify-content-center">
+        <div class="col-12 col-md-10 col-lg-8">
+            {% if ups_error %}
+                <div class="alert alert-danger text-center" role="alert">
+                    {{ ups_error }}
+                </div>
+            {% else %}
+                <div class="card border-success mb-4 shadow-sm">
+                    <div class="card-header bg-success text-white">
+                        <strong>UPS Battery Status</strong>
+                    </div>
+                    <div class="card-body">
+                        <div class="row text-center">
+                            <div class="col-4 mb-3">
+                                <h6>Charge</h6>
+                                <p class="h4 text-success">{{ ups_data.battery_charge }}%</p>
+                            </div>
+                            <div class="col-4 mb-3">
+                                <h6>Runtime</h6>
+                                <p class="h4">{{ runtime_minutes }} min</p>
+                            </div>
+                            <div class="col-4 mb-3">
+                                <h6>Power</h6>
+                                <p class="h4">{{ current_watts|floatformat:1 }} watts</p>
+                            </div>
+                        </div>
+                        <div class="row text-center">
+                            <div class="col-4 mb-3">
+                                <h6>Load</h6>
+                                <p class="h4">{{ ups_data.ups_load }}%</p>
+                            </div>
+                            <div class="col-4 mb-3">
+                                <h6>Status</h6>
+                                {% if "OB" in ups_data.ups_status %}
+                                    <span class="badge bg-warning text-dark">On Battery</span>
+                                {% elif "OL" in ups_data.ups_status %}
+                                    <span class="badge bg-success">Online</span>
+                                {% endif %}
+                            </div>
+                            <div class="col-4 mb-3">
+                                <h6>Input Voltage</h6>
+                                <p class="h4">{{ ups_data.input_voltage }} V</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
