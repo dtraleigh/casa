@@ -1,4 +1,3 @@
-# admin.py
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import WemoSwitch
@@ -12,6 +11,10 @@ class WemoSwitchAdmin(admin.ModelAdmin):
         'hostname',
         'model_name',
         'status_badge',
+        'live_status',
+        'power_state',
+        'live_status',
+        'power_state',
         'date_added',
         'last_seen'
     ]
@@ -62,17 +65,47 @@ class WemoSwitchAdmin(admin.ModelAdmin):
     ordering = ['-last_seen']
 
     def status_badge(self, obj):
-        """Display a colored status badge."""
+        """Display a colored status badge based on the disabled flag."""
         if obj.disabled:
             return format_html(
                 '<span style="color: white; background-color: #dc3545; padding: 2px 8px; border-radius: 3px;">Disabled</span>'
             )
         else:
             return format_html(
-                '<span style="color: white; background-color: #28a745; padding: 2px 8px; border-radius: 3px;">Active</span>'
+                '<span style="color: white; background-color: #28a745; padding: 2px 8px; border-radius: 3px;">Enabled</span>'
             )
 
     status_badge.short_description = 'Status'
+
+    def live_status(self, obj):
+        """Show if device is reachable."""
+        if obj.disabled:
+            return format_html(
+                '<span style="color: white; background-color: #6c757d; padding: 2px 8px; border-radius: 3px;">Disabled</span>'
+            )
+
+        state = obj.ping()  # <-- updates last_seen automatically
+        if state is not None:
+            return format_html(
+                '<span style="color: white; background-color: #28a745; padding: 2px 8px; border-radius: 3px;">Online</span>'
+            )
+        else:
+            return format_html(
+                '<span style="color: white; background-color: #dc3545; padding: 2px 8px; border-radius: 3px;">Offline</span>'
+            )
+
+    live_status.short_description = 'Live Status'
+
+    def power_state(self, obj):
+        """Show ON/OFF state if reachable."""
+        if obj.disabled:
+            return "-"
+        state = obj.ping()  # <-- updates last_seen automatically
+        if state is None:
+            return "Unknown"
+        return "On" if state == 1 else "Off"
+
+    power_state.short_description = 'Power'
 
     def device_info_display(self, obj):
         """Display formatted device information."""
