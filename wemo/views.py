@@ -218,7 +218,6 @@ def wemo_main(request):
 
 @login_required
 @require_http_methods(["POST"])
-@csrf_exempt  # You might want to handle CSRF properly in production
 def wemo_toggle(request, switch_id):
     """AJAX endpoint to toggle a Wemo switch."""
     try:

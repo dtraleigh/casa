@@ -41,26 +41,82 @@ class Command(BaseCommand):
         return default
 
     def device_exists(self, device):
-        """Check if device already exists in database using UDN or serial number."""
+        """Check if device already exists in database using multiple identifiers."""
         udn = getattr(device, 'udn', None)
         serial = self.get_attr_any(device, 'serial_number', 'serial')
+        mac = getattr(device, 'mac', None)
+        existing_switch = None
 
+        # Priority 1: Match by UDN (most reliable)
         if udn:
-            if WemoSwitch.objects.filter(udn=udn).exists():
-                return True, 'UDN'
+            existing_switch = WemoSwitch.objects.filter(udn=udn).first()
+            if existing_switch:
+                return True, 'UDN', existing_switch
 
+        # Priority 2: Match by Serial Number
         if serial:
-            if WemoSwitch.objects.filter(serial_number=serial).exists():
-                return True, 'Serial Number'
+            existing_switch = WemoSwitch.objects.filter(serial_number=serial).first()
+            if existing_switch:
+                return True, 'Serial Number', existing_switch
+
+        # Priority 3: Match by MAC Address (handles IP/port changes)
+        if mac:
+            existing_switch = WemoSwitch.objects.filter(mac_address=mac).first()
+            if existing_switch:
+                return True, 'MAC Address', existing_switch
 
         # Fallback: check by IP and name combination
         host = getattr(device, "host", None)
         name = getattr(device, 'name', None)
         if host and name:
-            if WemoSwitch.objects.filter(ip_address=host, name=name).exists():
-                return True, 'IP + Name'
+            existing_switch = WemoSwitch.objects.filter(ip_address=host, name=name).first()
+            if existing_switch:
+                return True, 'IP + Name', existing_switch
 
-        return False, None
+        return False, None, None
+
+    def update_existing_device(self, existing_switch, device):
+        """Update existing device with new network information."""
+        host = getattr(device, "host", None)
+        port = getattr(device, "port", None)
+        hostname = self.safe_gethost(host) if host else None
+        mac = getattr(device, 'mac', None)
+
+        # Track what changed
+        changes = []
+
+        if existing_switch.ip_address != host:
+            changes.append(f"IP: {existing_switch.ip_address} -> {host}")
+            existing_switch.ip_address = host
+
+        if existing_switch.port != port:
+            changes.append(f"Port: {existing_switch.port} -> {port}")
+            existing_switch.port = port
+
+        if existing_switch.hostname != hostname:
+            changes.append(f"Hostname: '{existing_switch.hostname}' -> '{hostname}'")
+            existing_switch.hostname = hostname
+
+        if mac and existing_switch.mac_address != mac:
+            changes.append(f"MAC: {existing_switch.mac_address} -> {mac}")
+            existing_switch.mac_address = mac
+
+        # Update other fields that might have changed
+        firmware = getattr(device, 'firmware_version', None)
+        if firmware and existing_switch.firmware_version != firmware:
+            changes.append(f"Firmware: {existing_switch.firmware_version} -> {firmware}")
+            existing_switch.firmware_version = firmware
+
+        # Update name if it changed
+        name = getattr(device, 'name', None)
+        if name and existing_switch.name != name:
+            changes.append(f"Name: '{existing_switch.name}' -> '{name}'")
+            existing_switch.name = name
+
+        if changes:
+            existing_switch.save()
+            return changes
+        return None
 
     def create_wemo_switch(self, device):
         """Create a WemoSwitch instance from discovered device."""
@@ -110,6 +166,7 @@ class Command(BaseCommand):
 
         new_devices = []
         existing_count = 0
+        updated_count = 0
 
         for device in devices:
             if options['verbose']:
@@ -120,11 +177,23 @@ class Command(BaseCommand):
                     f"  Serial: {self.get_attr_any(device, 'serial_number', 'serial', default='Unknown')}")
 
             # Check if device already exists
-            exists, match_type = self.device_exists(device)
+            exists, match_type, existing_switch = self.device_exists(device)
             if exists:
-                existing_count += 1
-                if options['verbose']:
-                    self.stdout.write(f"  Status: Already exists (matched by {match_type})")
+                # Check if we need to update network information
+                if existing_switch:
+                    changes = self.update_existing_device(existing_switch, device)
+                    if changes:
+                        updated_count += 1
+                        if options['verbose']:
+                            self.stdout.write(f"  Status: Updated ({', '.join(changes)})")
+                    else:
+                        existing_count += 1
+                        if options['verbose']:
+                            self.stdout.write(f"  Status: No changes needed (matched by {match_type})")
+                else:
+                    existing_count += 1
+                    if options['verbose']:
+                        self.stdout.write(f"  Status: Already exists (matched by {match_type})")
                 continue
 
             # Create new device
@@ -137,10 +206,11 @@ class Command(BaseCommand):
         # Summary
         self.stdout.write(f"\nSummary:")
         self.stdout.write(f"  Existing devices: {existing_count}")
+        self.stdout.write(f"  Updated devices: {updated_count}")
         self.stdout.write(f"  New devices to add: {len(new_devices)}")
 
         if options['dry_run']:
-            self.stdout.write(self.style.WARNING("\nDRY RUN - No devices were actually added"))
+            self.stdout.write(self.style.WARNING("\nDRY RUN - No changes were actually made"))
             if new_devices:
                 self.stdout.write("Would add these devices:")
                 for switch in new_devices:
@@ -158,7 +228,8 @@ class Command(BaseCommand):
                         )
 
                 self.stdout.write(
-                    self.style.SUCCESS(f"\nSuccessfully added {len(new_devices)} new Wemo device(s)")
+                    self.style.SUCCESS(
+                        f"\nSuccessfully added {len(new_devices)} new device(s) and updated {updated_count} existing device(s)")
                 )
             except Exception as e:
                 raise CommandError(f"Failed to save devices: {e}")

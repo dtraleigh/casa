@@ -38,10 +38,14 @@ class WemoSwitch(models.Model):
         super().save(*args, **kwargs)
 
     def ping(self):
-        state = self.get_state()
-        self.last_seen = timezone.now()
-        self.save(update_fields=["last_seen"])
-        return state
+        try:
+            state = self.get_state()
+            self.last_seen = timezone.now()
+            self.save(update_fields=["last_seen"])
+            return state
+        except Exception:
+            # Device is unreachable, return None to indicate offline status
+            return None
 
     # --------------------
     # Internal SOAP helper
@@ -97,15 +101,26 @@ class WemoSwitch(models.Model):
                  - 0: Switch is OFF (not providing power).
                  - 1: Switch is ON (providing power).
                  - Other values (e.g., 8): Transitional or model-specific states.
+
+        Raises:
+            requests.exceptions.RequestException: If device is unreachable
         """
-        xml = self._soap_request(
-            "urn:Belkin:service:basicevent:1",
-            "/upnp/control/basicevent1",
-            "GetBinaryState"
-        )
-        root = ET.fromstring(xml)
-        state = root.find(".//BinaryState")
-        return int(state.text) if state is not None else None
+        try:
+            xml = self._soap_request(
+                "urn:Belkin:service:basicevent:1",
+                "/upnp/control/basicevent1",
+                "GetBinaryState"
+            )
+            root = ET.fromstring(xml)
+            state = root.find(".//BinaryState")
+            return int(state.text) if state is not None else None
+        except (requests.exceptions.RequestException, requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout, ConnectionRefusedError) as e:
+            # Re-raise connection-related errors so calling code can handle them
+            raise e
+        except Exception as e:
+            # For other errors (XML parsing, etc.), also raise
+            raise e
 
     # --------------------
     # Device info
