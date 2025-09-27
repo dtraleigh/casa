@@ -9,9 +9,177 @@ from django.utils import timezone
 from .models import WemoSwitch
 import requests
 import logging
-import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
+
+
+@login_required
+@require_http_methods(["POST"])
+def wemo_discover(request):
+    """AJAX endpoint to discover/update Wemo devices."""
+    try:
+        # Import here to avoid startup issues if pywemo isn't installed
+        import pywemo
+        import socket
+
+        def safe_gethost(ip):
+            try:
+                return socket.gethostbyaddr(ip)[0]
+            except Exception:
+                return None
+
+        def get_attr_any(obj, *names, default=None):
+            for name in names:
+                if hasattr(obj, name):
+                    return getattr(obj, name)
+            return default
+
+        def device_exists_and_update(device):
+            """Check if device exists and update if needed."""
+            udn = getattr(device, 'udn', None)
+            serial = get_attr_any(device, 'serial_number', 'serial')
+            mac = getattr(device, 'mac', None)
+            existing_switch = None
+
+            # Match by UDN, Serial, or MAC
+            if udn:
+                existing_switch = WemoSwitch.objects.filter(udn=udn).first()
+                match_type = 'UDN'
+            elif serial:
+                existing_switch = WemoSwitch.objects.filter(serial_number=serial).first()
+                match_type = 'Serial'
+            elif mac:
+                existing_switch = WemoSwitch.objects.filter(mac_address=mac).first()
+                match_type = 'MAC'
+            else:
+                # Fallback to IP + Name
+                host = getattr(device, "host", None)
+                name = getattr(device, 'name', None)
+                if host and name:
+                    existing_switch = WemoSwitch.objects.filter(ip_address=host, name=name).first()
+                    match_type = 'IP+Name'
+
+            if existing_switch:
+                # Update existing device
+                host = getattr(device, "host", None)
+                port = getattr(device, "port", None)
+                hostname = safe_gethost(host) if host else None
+                mac = getattr(device, 'mac', None)
+
+                changes = []
+                if existing_switch.ip_address != host:
+                    changes.append(f"IP: {existing_switch.ip_address} → {host}")
+                    existing_switch.ip_address = host
+
+                if existing_switch.port != port:
+                    changes.append(f"Port: {existing_switch.port} → {port}")
+                    existing_switch.port = port
+
+                if existing_switch.hostname != hostname:
+                    changes.append(f"Hostname: '{existing_switch.hostname}' → '{hostname}'")
+                    existing_switch.hostname = hostname
+
+                if mac and existing_switch.mac_address != mac:
+                    changes.append(f"MAC: {existing_switch.mac_address} → {mac}")
+                    existing_switch.mac_address = mac
+
+                if changes:
+                    existing_switch.save()
+                    return 'updated', existing_switch.name, changes
+                else:
+                    return 'unchanged', existing_switch.name, []
+
+            return None, None, []
+
+        # Discover devices
+        devices = pywemo.discover_devices()
+
+        if not devices:
+            return JsonResponse({
+                'success': True,
+                'message': 'No Wemo devices found on network',
+                'discovered': 0,
+                'new': 0,
+                'updated': 0,
+                'details': []
+            })
+
+        new_count = 0
+        updated_count = 0
+        unchanged_count = 0
+        details = []
+
+        for device in devices:
+            name = getattr(device, 'name', 'Unknown')
+            host = getattr(device, 'host', 'Unknown')
+
+            result, device_name, changes = device_exists_and_update(device)
+
+            if result == 'updated':
+                updated_count += 1
+                details.append({
+                    'action': 'updated',
+                    'name': device_name,
+                    'changes': changes
+                })
+            elif result == 'unchanged':
+                unchanged_count += 1
+                details.append({
+                    'action': 'unchanged',
+                    'name': device_name,
+                    'ip': host
+                })
+            else:
+                # New device - create it
+                try:
+                    switch = WemoSwitch(
+                        name=name,
+                        hostname=safe_gethost(host),
+                        ip_address=host,
+                        port=getattr(device, "port", None),
+                        model=get_attr_any(device, 'model', 'model_name'),
+                        model_name=getattr(device, 'model_name', None),
+                        serial_number=get_attr_any(device, 'serial_number', 'serial'),
+                        udn=getattr(device, 'udn', None),
+                        mac_address=getattr(device, 'mac', None),
+                        manufacturer=getattr(device, 'manufacturer', None),
+                        firmware_version=getattr(device, 'firmware_version', None),
+                    )
+                    switch.save()
+                    new_count += 1
+                    details.append({
+                        'action': 'added',
+                        'name': name,
+                        'ip': host
+                    })
+                except Exception as e:
+                    details.append({
+                        'action': 'error',
+                        'name': name,
+                        'error': str(e)
+                    })
+
+        return JsonResponse({
+            'success': True,
+            'message': f'Discovery complete: {new_count} added, {updated_count} updated, {unchanged_count} unchanged',
+            'discovered': len(devices),
+            'new': new_count,
+            'updated': updated_count,
+            'unchanged': unchanged_count,
+            'details': details
+        })
+
+    except ImportError:
+        return JsonResponse({
+            'success': False,
+            'error': 'pywemo library not available'
+        })
+    except Exception as e:
+        logger.error(f"Error in wemo_discover: {e}")
+        return JsonResponse({
+            'success': False,
+            'error': f'Discovery failed: {str(e)}'
+        })
 
 
 @login_required

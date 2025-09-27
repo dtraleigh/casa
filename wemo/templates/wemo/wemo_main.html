@@ -1,17 +1,25 @@
 {% extends 'base.html' %}
+{% load static %}
 
 {% block title %}Wemo Controls - Casa{% endblock %}
 
 {% block content %}
+{% csrf_token %}
 <div class="container py-4">
     <div class="row justify-content-center">
         <div class="col-12 col-lg-10">
             <div class="d-flex justify-content-between align-items-center mb-4">
                 <h2 class="mb-0">Wemo Controls</h2>
-                <div class="text-muted">
-                    <small>
-                        {{ online_count }} of {{ total_switches }} devices online
-                    </small>
+                <div class="d-flex align-items-center gap-3">
+                    <div class="text-muted">
+                        <small>
+                            {{ online_count }} of {{ total_switches }} devices online
+                        </small>
+                    </div>
+                    <button class="btn btn-outline-primary" id="discover-btn">
+                        <i class="fas fa-search me-2"></i>
+                        Discover Devices
+                    </button>
                 </div>
             </div>
 
@@ -124,6 +132,27 @@
     </div>
 </div>
 
+<!-- Discovery Results Modal -->
+<div class="modal fade" id="discoveryModal" tabindex="-1" aria-labelledby="discoveryModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="discoveryModalLabel">
+                    <i class="fas fa-search me-2"></i>Device Discovery Results
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="discovery-results">
+                <!-- Results will be populated here -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" onclick="location.reload()">Refresh Page</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Toast container for notifications -->
 <div class="toast-container position-fixed bottom-0 end-0 p-3">
     <div id="notification-toast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
@@ -140,6 +169,9 @@
 document.addEventListener('DOMContentLoaded', function() {
     const toastEl = document.getElementById('notification-toast');
     const toast = new bootstrap.Toast(toastEl);
+
+    // Get CSRF token
+    const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
 
     function formatDateTime(date) {
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -225,6 +257,117 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // Discovery button handler
+    document.getElementById('discover-btn').addEventListener('click', function() {
+        const btn = this;
+        const originalText = btn.innerHTML;
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Discovering...';
+
+        fetch('/wemo/discover/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrftoken,
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showDiscoveryResults(data);
+                showNotification(data.message);
+            } else {
+                showNotification(data.error || 'Discovery failed', true);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showNotification('Network error during discovery', true);
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        });
+    });
+
+    function showDiscoveryResults(data) {
+        const modal = new bootstrap.Modal(document.getElementById('discoveryModal'));
+        const resultsDiv = document.getElementById('discovery-results');
+
+        let html = `
+            <div class="row mb-3">
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h5 class="card-title text-primary">${data.discovered}</h5>
+                            <p class="card-text">Devices Found</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h5 class="card-title text-success">${data.new}</h5>
+                            <p class="card-text">New Devices</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h5 class="card-title text-warning">${data.updated}</h5>
+                            <p class="card-text">Updated Devices</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        if (data.details && data.details.length > 0) {
+            html += '<h6>Device Details:</h6><div class="list-group">';
+
+            data.details.forEach(detail => {
+                let badgeClass, iconClass, message;
+
+                if (detail.action === 'added') {
+                    badgeClass = 'bg-success';
+                    iconClass = 'fa-plus';
+                    message = `Added: ${detail.name} (${detail.ip})`;
+                } else if (detail.action === 'updated') {
+                    badgeClass = 'bg-warning text-dark';
+                    iconClass = 'fa-sync-alt';
+                    message = `Updated: ${detail.name}`;
+                    if (detail.changes.length > 0) {
+                        message += `<br><small>${detail.changes.join(', ')}</small>`;
+                    }
+                } else if (detail.action === 'unchanged') {
+                    badgeClass = 'bg-secondary';
+                    iconClass = 'fa-check';
+                    message = `Unchanged: ${detail.name} (${detail.ip})`;
+                } else if (detail.action === 'error') {
+                    badgeClass = 'bg-danger';
+                    iconClass = 'fa-exclamation-triangle';
+                    message = `Error: ${detail.name} - ${detail.error}`;
+                }
+
+                html += `
+                    <div class="list-group-item">
+                        <span class="badge ${badgeClass} me-2">
+                            <i class="fas ${iconClass}"></i>
+                        </span>
+                        ${message}
+                    </div>
+                `;
+            });
+
+            html += '</div>';
+        }
+
+        resultsDiv.innerHTML = html;
+        modal.show();
+    }
+
     // Toggle switch handler
     document.addEventListener('click', function(e) {
         if (e.target.classList.contains('toggle-btn') || e.target.closest('.toggle-btn')) {
@@ -238,6 +381,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-CSRFToken': csrftoken,
                 }
             })
             .then(response => response.json())
