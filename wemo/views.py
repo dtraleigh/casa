@@ -1,4 +1,6 @@
 import json
+from zoneinfo import ZoneInfo
+
 from django.shortcuts import render, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
@@ -11,7 +13,6 @@ import logging
 from datetime import datetime, timedelta, time
 from astral import LocationInfo
 from astral.sun import sun
-import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +327,7 @@ def away_mode_status(request):
 
         # Calculate today's sunset and next action times
         city = LocationInfo("Raleigh", "USA", "America/New_York", 35.7796, -78.6382)
-        eastern = pytz.timezone('America/New_York')
+        eastern = ZoneInfo("America/New_York")
         now = timezone.now().astimezone(eastern)
         today = now.date()
 
@@ -337,10 +338,11 @@ def away_mode_status(request):
         sunset_window_start = sunset_time - timedelta(minutes=settings.sunset_window_minutes)
         sunset_window_end = sunset_time + timedelta(minutes=settings.sunset_window_minutes)
 
-        off_time = eastern.localize(datetime.combine(
-            today,
-            time(settings.off_time_hour, settings.off_time_minute)
-        ))
+        off_time = datetime.combine(
+            now.date(),
+            time(settings.off_time_hour, settings.off_time_minute),
+            tzinfo=eastern
+        )
         off_window_start = off_time - timedelta(minutes=settings.off_window_minutes)
         off_window_end = off_time + timedelta(minutes=settings.off_window_minutes)
 

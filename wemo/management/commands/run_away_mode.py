@@ -6,6 +6,7 @@ from django.db import transaction
 from wemo.models import WemoSwitch, AwayModeSettings
 from astral import LocationInfo
 from astral.sun import sun
+from zoneinfo import ZoneInfo
 
 import logging
 logger = logging.getLogger('away_mode')
@@ -34,7 +35,7 @@ class Command(BaseCommand):
         city = LocationInfo("Raleigh", "USA", "America/New_York", 35.7796, -78.6382)
 
         # Get today's date in Eastern timezone
-        eastern = timezone.pytz.timezone('America/New_York')
+        eastern = ZoneInfo("America/New_York")
         now = timezone.now().astimezone(eastern)
         today = now.date()
 
@@ -97,10 +98,11 @@ class Command(BaseCommand):
     def check_night_off(self, settings, now, eastern, dry_run):
         """Check if it's time to turn lights off around 10:30 PM."""
         # Create the target off time for today
-        off_time = eastern.localize(datetime.combine(
+        off_time = datetime.combine(
             now.date(),
-            time(settings.off_time_hour, settings.off_time_minute)
-        ))
+            time(settings.off_time_hour, settings.off_time_minute),
+            tzinfo=eastern
+        )
 
         window_start = off_time - timedelta(minutes=settings.off_window_minutes)
         window_end = off_time + timedelta(minutes=settings.off_window_minutes)
