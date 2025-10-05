@@ -13,6 +13,8 @@ import logging
 from datetime import datetime, timedelta, time
 from astral import LocationInfo
 from astral.sun import sun
+import pywemo
+import socket
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +24,6 @@ logger = logging.getLogger(__name__)
 def wemo_discover(request):
     """AJAX endpoint to discover/update Wemo devices."""
     try:
-        # Import here to avoid startup issues if pywemo isn't installed
-        import pywemo
-        import socket
-
         def safe_gethost(ip):
             try:
                 return socket.gethostbyaddr(ip)[0]
@@ -191,6 +189,12 @@ def wemo_main(request):
     """Main Wemo control page with device status."""
     switches = WemoSwitch.objects.filter(disabled=False).order_by('name')
 
+    try:
+        away_mode_enabled = AwayModeSettings.get_settings().enabled
+    except Exception as e:
+        logger.error(f"Error fetching Away Mode setting: {e}")
+        away_mode_enabled = False
+
     # Get current state for each switch
     switch_data = []
     for switch in switches:
@@ -214,7 +218,8 @@ def wemo_main(request):
     context = {
         'switch_data': switch_data,
         'total_switches': len(switches),
-        'online_count': sum(1 for data in switch_data if data['online'])
+        'online_count': sum(1 for data in switch_data if data['online']),
+        'away_mode_enabled': away_mode_enabled
     }
 
     return render(request, 'wemo/wemo_main.html', context)
