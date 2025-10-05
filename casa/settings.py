@@ -112,6 +112,14 @@ LOGGING = {
             'maxBytes': 50 * 1024 * 1024,  # 50MB
             'backupCount': 5,
         },
+        'away_mode_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': '/var/log/django/away_mode.log',
+            'formatter': 'verbose',
+            'maxBytes': 10 * 1024 * 1024,  # 10MB
+            'backupCount': 3,
+        },
     },
 
     'loggers': {
@@ -123,6 +131,11 @@ LOGGING = {
         'core.views': {
             'handlers': ['file'],
             'level': 'DEBUG',
+            'propagate': False,
+        },
+        'away_mode': {
+            'handlers': ['away_mode_file'],
+            'level': 'INFO',
             'propagate': False,
         },
     },

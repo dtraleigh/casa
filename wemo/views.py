@@ -1,4 +1,3 @@
-# views.py
 import json
 from django.shortcuts import render, get_object_or_404
 from django.contrib.auth.decorators import login_required
@@ -6,9 +5,13 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils import timezone
-from .models import WemoSwitch
+from .models import WemoSwitch, AwayModeSettings
 import requests
 import logging
+from datetime import datetime, timedelta, time
+from astral import LocationInfo
+from astral.sun import sun
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -311,4 +314,71 @@ def wemo_refresh_status(request, switch_id):
         return JsonResponse({
             'success': False,
             'error': 'Switch not found'
+        })
+
+
+@login_required
+@require_http_methods(["GET"])
+def away_mode_status(request):
+    """Get current Away Mode status and next scheduled times."""
+    try:
+        settings = AwayModeSettings.get_settings()
+
+        # Calculate today's sunset and next action times
+        city = LocationInfo("Raleigh", "USA", "America/New_York", 35.7796, -78.6382)
+        eastern = pytz.timezone('America/New_York')
+        now = timezone.now().astimezone(eastern)
+        today = now.date()
+
+        s = sun(city.observer, date=today, tzinfo=eastern)
+        sunset_time = s['sunset']
+
+        # Calculate windows
+        sunset_window_start = sunset_time - timedelta(minutes=settings.sunset_window_minutes)
+        sunset_window_end = sunset_time + timedelta(minutes=settings.sunset_window_minutes)
+
+        off_time = eastern.localize(datetime.combine(
+            today,
+            time(settings.off_time_hour, settings.off_time_minute)
+        ))
+        off_window_start = off_time - timedelta(minutes=settings.off_window_minutes)
+        off_window_end = off_time + timedelta(minutes=settings.off_window_minutes)
+
+        return JsonResponse({
+            'success': True,
+            'enabled': settings.enabled,
+            'sunset_time': sunset_time.strftime('%I:%M %p'),
+            'sunset_window': f"{sunset_window_start.strftime('%I:%M %p')} - {sunset_window_end.strftime('%I:%M %p')}",
+            'off_time': off_time.strftime('%I:%M %p'),
+            'off_window': f"{off_window_start.strftime('%I:%M %p')} - {off_window_end.strftime('%I:%M %p')}",
+            'last_sunset_on': settings.last_sunset_on.isoformat() if settings.last_sunset_on else None,
+            'last_night_off': settings.last_night_off.isoformat() if settings.last_night_off else None,
+        })
+    except Exception as e:
+        logger.error(f"Error getting away mode status: {e}")
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        })
+
+
+@login_required
+@require_http_methods(["POST"])
+def away_mode_toggle(request):
+    """Toggle Away Mode on/off."""
+    try:
+        settings = AwayModeSettings.get_settings()
+        settings.enabled = not settings.enabled
+        settings.save()
+
+        return JsonResponse({
+            'success': True,
+            'enabled': settings.enabled,
+            'message': f"Away Mode {'enabled' if settings.enabled else 'disabled'}"
+        })
+    except Exception as e:
+        logger.error(f"Error toggling away mode: {e}")
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
         })

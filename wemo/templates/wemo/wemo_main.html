@@ -8,18 +8,53 @@
 <div class="container py-4">
     <div class="row justify-content-center">
         <div class="col-12 col-lg-10">
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <h2 class="mb-0">Wemo Controls</h2>
-                <div class="d-flex align-items-center gap-3">
-                    <div class="text-muted">
-                        <small>
-                            {{ online_count }} of {{ total_switches }} devices online
-                        </small>
+            <div class="col-12 col-lg-10">
+                <div class="mb-4">
+                    <!-- Header - full width on all screens -->
+                    <h2 class="mb-3">Wemo Smart Plug Controls</h2>
+
+                    <!-- Controls - stack on mobile, horizontal on larger screens -->
+                    <div class="d-flex flex-column flex-md-row justify-content-md-between align-items-md-center gap-3">
+                        <!-- Away Mode Toggle -->
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="away-mode-toggle" {% if away_mode_enabled %}checked{% endif %}>
+                            <label class="form-check-label" for="away-mode-toggle">
+                                <i class="fas fa-plane-departure me-1"></i>
+                                Away Mode
+                            </label>
+                        </div>
+
+                        <div class="text-muted">
+                            <small>
+                                {{ online_count }} of {{ total_switches }} devices online
+                            </small>
+                        </div>
+
+                        <button class="btn btn-outline-primary" id="discover-btn">
+                            <i class="fas fa-search me-2"></i>
+                            Discover Devices
+                        </button>
                     </div>
-                    <button class="btn btn-outline-primary" id="discover-btn">
-                        <i class="fas fa-search me-2"></i>
-                        Discover Devices
-                    </button>
+                </div>
+            </div>
+
+            <!-- Away Mode Info Card -->
+            <div class="card shadow-sm mb-3 {% if away_mode_enabled %}border-primary{% endif %}" id="away-mode-info" style="{% if not away_mode_enabled %}display: none;{% endif %}">
+                <div class="card-body">
+                    <div class="row align-items-center">
+                        <div class="col-md-8">
+                            <h6 class="mb-2">
+                                <i class="fas fa-plane-departure text-primary me-2"></i>
+                                Away Mode Active
+                            </h6>
+                            <small class="text-muted" id="away-mode-details">
+                                Loading schedule information...
+                            </small>
+                        </div>
+                        <div class="col-md-4 text-end">
+                            <span class="badge bg-primary">Automated Control Enabled</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -72,7 +107,7 @@
                                     <br>
                                     <small class="text-muted">
                                         <i class="fas fa-clock me-1"></i>
-                                        Last seen: <span class="last-seen-time">{{ data.switch.last_seen|date:"M d, Y H:i A" }}</span>
+                                        Last seen: <span class="last-seen-time">{{ data.switch.last_seen|date:"M d, Y H:i" }}</span>
                                     </small>
                                 </div>
 
@@ -95,7 +130,7 @@
                                 {% else %}
                                     <div class="alert alert-warning mb-2" role="alert">
                                         <i class="fas fa-exclamation-triangle me-2"></i>
-                                        <small>Device is down. Controls are disabled.</small>
+                                        <small>Device is offline or unreachable. Controls are disabled.</small>
                                     </div>
                                     <div class="d-grid">
                                         <button class="btn btn-secondary" disabled>
@@ -172,6 +207,71 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Get CSRF token
     const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+    // Away Mode functionality
+    const awayModeToggle = document.getElementById('away-mode-toggle');
+    const awayModeInfo = document.getElementById('away-mode-info');
+    const awayModeDetails = document.getElementById('away-mode-details');
+
+    // Fetch and display away mode status
+    function updateAwayModeInfo() {
+        fetch('/wemo/away-mode/status/')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    awayModeDetails.innerHTML = `
+                        <strong>Sunset window:</strong> ${data.sunset_window}<br>
+                        <strong>Off time window:</strong> ${data.off_window}<br>
+                        <small class="text-muted">Lights will turn on randomly around ${data.sunset_time} and off around ${data.off_time}</small>
+                    `;
+                }
+            })
+            .catch(error => console.error('Error fetching away mode status:', error));
+    }
+
+    // Update info on page load if away mode is enabled
+    if (awayModeToggle.checked) {
+        updateAwayModeInfo();
+    }
+
+    // Handle away mode toggle
+    awayModeToggle.addEventListener('change', function() {
+        const isEnabled = this.checked;
+
+        fetch('/wemo/away-mode/toggle/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrftoken,
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showNotification(data.message);
+
+                // Show/hide info card
+                if (data.enabled) {
+                    awayModeInfo.style.display = 'block';
+                    awayModeInfo.classList.add('border-primary');
+                    updateAwayModeInfo();
+                } else {
+                    awayModeInfo.style.display = 'none';
+                    awayModeInfo.classList.remove('border-primary');
+                }
+            } else {
+                showNotification(data.error || 'Failed to toggle Away Mode', true);
+                // Revert toggle on error
+                this.checked = !isEnabled;
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showNotification('Network error occurred', true);
+            // Revert toggle on error
+            this.checked = !isEnabled;
+        });
+    });
 
     function formatDateTime(date) {
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',

@@ -1,7 +1,56 @@
-# admin.py
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import WemoSwitch
+from .models import WemoSwitch, AwayModeSettings
+
+
+@admin.register(AwayModeSettings)
+class AwayModeSettingsAdmin(admin.ModelAdmin):
+    list_display = ['__str__', 'enabled', 'sunset_window_minutes', 'off_time_display', 'last_activity']
+
+    fieldsets = (
+        ('Status', {
+            'fields': ('enabled',)
+        }),
+        ('Sunset Settings', {
+            'fields': ('sunset_window_minutes',),
+            'description': 'Lights will turn on randomly within this window around sunset'
+        }),
+        ('Night Off Settings', {
+            'fields': ('off_time_hour', 'off_time_minute', 'off_window_minutes'),
+            'description': 'Lights will turn off randomly within this window around the specified time'
+        }),
+        ('Activity Log', {
+            'fields': ('last_sunset_on', 'last_night_off'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    readonly_fields = ['last_sunset_on', 'last_night_off']
+
+    def off_time_display(self, obj):
+        """Display the off time in readable format."""
+        return f"{obj.off_time_hour:02d}:{obj.off_time_minute:02d}"
+
+    off_time_display.short_description = 'Off Time'
+
+    def last_activity(self, obj):
+        """Display last activity."""
+        activities = []
+        if obj.last_sunset_on:
+            activities.append(f"Sunset: {obj.last_sunset_on}")
+        if obj.last_night_off:
+            activities.append(f"Night: {obj.last_night_off}")
+        return " | ".join(activities) if activities else "No activity yet"
+
+    last_activity.short_description = 'Last Activity'
+
+    def has_add_permission(self, request):
+        # Only allow one instance
+        return not AwayModeSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        # Don't allow deletion
+        return False
 
 
 @admin.register(WemoSwitch)
@@ -9,7 +58,6 @@ class WemoSwitchAdmin(admin.ModelAdmin):
     list_display = [
         'name',
         'ip_address',
-        'port',
         'hostname',
         'model_name',
         'status_badge',
@@ -84,6 +132,7 @@ class WemoSwitchAdmin(admin.ModelAdmin):
                 return format_html(
                     '<span style="color: white; background-color: #ffc107; padding: 2px 8px; border-radius: 3px; color: black;">Offline</span>'
                 )
+
     status_badge.short_description = 'Status'
 
     def device_info_display(self, obj):

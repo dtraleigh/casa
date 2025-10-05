@@ -159,3 +159,34 @@ class WemoSwitch(models.Model):
             "StoreRules",
             f"<rules>{rules_xml}</rules>"
         )
+
+
+class AwayModeSettings(models.Model):
+    """Settings for Away Mode - simulates presence when away from home."""
+
+    enabled = models.BooleanField(default=False, help_text="Whether Away Mode is currently active")
+    sunset_window_minutes = models.IntegerField(
+        default=15,
+        help_text="Minutes before/after sunset to randomly turn on lights (total window = 2x this value)"
+    )
+    off_time_hour = models.IntegerField(default=22, help_text="Hour (24h format) to turn off lights")
+    off_time_minute = models.IntegerField(default=30, help_text="Minute to turn off lights")
+    off_window_minutes = models.IntegerField(
+        default=15,
+        help_text="Minutes before/after off time to randomly turn off lights"
+    )
+    last_sunset_on = models.DateField(null=True, blank=True, help_text="Last date lights were turned on at sunset")
+    last_night_off = models.DateField(null=True, blank=True, help_text="Last date lights were turned off at night")
+
+    class Meta:
+        verbose_name = "Away Mode Settings"
+        verbose_name_plural = "Away Mode Settings"
+
+    def __str__(self):
+        return f"Away Mode ({'Enabled' if self.enabled else 'Disabled'})"
+
+    @classmethod
+    def get_settings(cls):
+        """Get or create the singleton settings instance."""
+        settings, created = cls.objects.get_or_create(pk=1)
+        return settings
