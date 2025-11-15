@@ -1,0 +1,45 @@
+name: casa_env
+channels:
+  - defaults
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+  - https://repo.anaconda.com/pkgs/msys2
+dependencies:
+  - bzip2=1.0.8=h2bbff1b_6
+  - ca-certificates=2025.9.9=haa95532_0
+  - expat=2.6.4=h8ddb27b_0
+  - libffi=3.4.4=hd77b12b_1
+  - openssl=3.0.18=h543e019_0
+  - pip=24.2=py312haa95532_0
+  - python=3.12.2=h1d929f7_0
+  - setuptools=75.1.0=py312haa95532_0
+  - sqlite=3.45.3=h2bbff1b_0
+  - tk=8.6.14=h0416ee5_0
+  - ucrt=10.0.22621.0=haa95532_0
+  - vc=14.40=haa95532_2
+  - vc14_runtime=14.44.35208=h4927774_10
+  - vs2015_runtime=14.44.35208=ha6b5a95_10
+  - wheel=0.44.0=py312haa95532_0
+  - xz=5.4.6=h8cc25b3_1
+  - zlib=1.2.13=h8cc25b3_1
+  - pip:
+      - asgiref==3.8.1
+      - astral==3.2
+      - certifi==2025.8.3
+      - charset-normalizer==3.4.3
+      - django==5.1.12
+      - django-environ==0.12.0
+      - gunicorn==23.0.0
+      - idna==3.10
+      - ifaddr==0.2.0
+      - lxml==6.0.0
+      - packaging==24.2
+      - psycopg==3.2.6
+      - psycopg2-binary==2.9.10
+      - pywemo==1.4.0
+      - requests==2.32.4
+      - sqlparse==0.5.3
+      - typing-extensions==4.13.2
+      - tzdata==2024.2
+      - urllib3==2.5.0
+prefix: C:\Users\leo\miniconda3.12\envs\casa_env
