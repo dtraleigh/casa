@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils import timezone
-from .models import WemoSwitch, AwayModeSettings
+from .models import WemoSwitch, AwayModeSettings, SwitchEvent
 import requests
 import logging
 from datetime import datetime, timedelta, time
@@ -188,6 +188,7 @@ def wemo_discover(request):
 def wemo_main(request):
     """Main Wemo control page with device status."""
     switches = WemoSwitch.objects.filter(disabled=False).order_by('name')
+    events = SwitchEvent.objects.select_related('switch').all()[:20]
 
     try:
         away_mode_enabled = AwayModeSettings.get_settings().enabled
@@ -219,11 +220,41 @@ def wemo_main(request):
         'switch_data': switch_data,
         'total_switches': len(switches),
         'online_count': sum(1 for data in switch_data if data['online']),
-        'away_mode_enabled': away_mode_enabled
+        'away_mode_enabled': away_mode_enabled,
+        'events': events
     }
 
     return render(request, 'wemo/wemo_main.html', context)
 
+
+@login_required
+@require_http_methods(["GET"])
+def event_history(request):
+    """Get recent switch events."""
+    try:
+        events = SwitchEvent.objects.select_related('switch').all()[:20]
+
+        events_data = [{
+            'id': event.id,
+            'event_type': event.event_type,
+            'timestamp': event.timestamp.isoformat(),
+            'notes': event.notes,
+            'switch': {
+                'name': event.switch.name,
+                'ip_address': event.switch.ip_address,
+            } if event.switch else None
+        } for event in events]
+
+        return JsonResponse({
+            'success': True,
+            'events': events_data
+        })
+    except Exception as e:
+        logger.error(f"Error fetching event history: {e}")
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        })
 
 @login_required
 @require_http_methods(["POST"])
@@ -377,6 +408,11 @@ def away_mode_toggle(request):
         settings = AwayModeSettings.get_settings()
         settings.enabled = not settings.enabled
         settings.save()
+
+        SwitchEvent.objects.create(
+            event_type='away_mode_on' if settings.enabled else 'away_mode_off',
+            notes=f"Toggled by {request.user.username}"
+        )
 
         return JsonResponse({
             'success': True,

@@ -163,6 +163,107 @@
                     </div>
                 </div>
             {% endif %}
+            <!-- Event History Section -->
+            <div class="row justify-content-center mt-5">
+                <div class="col-12 col-lg-10">
+                    <div class="card shadow-sm">
+                        <div class="card-header bg-light">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">
+                                    <i class="fas fa-history me-2"></i>
+                                    Recent Activity
+                                </h5>
+                                <button class="btn btn-sm btn-outline-secondary" id="refresh-history-btn">
+                                    <i class="fas fa-sync-alt me-1"></i>
+                                    Refresh
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-hover mb-0" id="event-history-table">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th scope="col" style="width: 20%;">Time</th>
+                                            <th scope="col" style="width: 15%;">Event Type</th>
+                                            <th scope="col" style="width: 25%;">Device</th>
+                                            <th scope="col" style="width: 40%;">Notes</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="event-history-body">
+                                        {% if events %}
+                                            {% for event in events %}
+                                            <tr>
+                                                <td>
+                                                    <small class="text-muted">
+                                                        {{ event.timestamp|date:"M d, Y" }}<br>
+                                                        {{ event.timestamp|date:"g:i A" }}
+                                                    </small>
+                                                </td>
+                                                <td>
+                                                    {% if event.event_type == 'switch_on' %}
+                                                        <span class="badge bg-success">
+                                                            <i class="fas fa-toggle-on me-1"></i>
+                                                            Switch On
+                                                        </span>
+                                                    {% elif event.event_type == 'switch_off' %}
+                                                        <span class="badge bg-secondary">
+                                                            <i class="fas fa-toggle-off me-1"></i>
+                                                            Switch Off
+                                                        </span>
+                                                    {% elif event.event_type == 'away_mode_on' %}
+                                                        <span class="badge bg-primary">
+                                                            <i class="fas fa-plane-departure me-1"></i>
+                                                            Away Mode On
+                                                        </span>
+                                                    {% elif event.event_type == 'away_mode_off' %}
+                                                        <span class="badge bg-info text-dark">
+                                                            <i class="fas fa-plane-arrival me-1"></i>
+                                                            Away Mode Off
+                                                        </span>
+                                                    {% endif %}
+                                                </td>
+                                                <td>
+                                                    {% if event.switch %}
+                                                        <i class="fas fa-plug me-1"></i>
+                                                        {{ event.switch.name }}
+                                                        <br>
+                                                        <small class="text-muted">{{ event.switch.ip_address }}</small>
+                                                    {% else %}
+                                                        <span class="text-muted">—</span>
+                                                    {% endif %}
+                                                </td>
+                                                <td>
+                                                    {% if event.notes %}
+                                                        <small>{{ event.notes }}</small>
+                                                    {% else %}
+                                                        <span class="text-muted">—</span>
+                                                    {% endif %}
+                                                </td>
+                                            </tr>
+                                            {% endfor %}
+                                        {% else %}
+                                            <tr>
+                                                <td colspan="4" class="text-center text-muted py-4">
+                                                    <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
+                                                    No events recorded yet
+                                                </td>
+                                            </tr>
+                                        {% endif %}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Pagination or Load More if you have many events -->
+                            {% if events.count > 20 %}
+                            <div class="card-footer bg-light text-center">
+                                <small class="text-muted">Showing last 20 events</small>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -533,5 +634,84 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 });
+// Refresh event history handler
+document.getElementById('refresh-history-btn').addEventListener('click', function() {
+    const btn = this;
+    const originalHTML = btn.innerHTML;
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Refreshing...';
+
+    fetch('/wemo/events/')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                updateEventHistory(data.events);
+                showNotification('Event history refreshed');
+            } else {
+                showNotification('Failed to refresh event history', true);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showNotification('Network error occurred', true);
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = originalHTML;
+        });
+});
+
+function updateEventHistory(events) {
+    const tbody = document.getElementById('event-history-body');
+
+    if (events.length === 0) {
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="4" class="text-center text-muted py-4">
+                    <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
+                    No events recorded yet
+                </td>
+            </tr>
+        `;
+        return;
+    }
+
+    tbody.innerHTML = events.map(event => {
+        const timestamp = new Date(event.timestamp);
+        const date = timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        const time = timestamp.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+
+        let eventBadge = '';
+        if (event.event_type === 'switch_on') {
+            eventBadge = '<span class="badge bg-success"><i class="fas fa-toggle-on me-1"></i>Switch On</span>';
+        } else if (event.event_type === 'switch_off') {
+            eventBadge = '<span class="badge bg-secondary"><i class="fas fa-toggle-off me-1"></i>Switch Off</span>';
+        } else if (event.event_type === 'away_mode_on') {
+            eventBadge = '<span class="badge bg-primary"><i class="fas fa-plane-departure me-1"></i>Away Mode On</span>';
+        } else if (event.event_type === 'away_mode_off') {
+            eventBadge = '<span class="badge bg-info text-dark"><i class="fas fa-plane-arrival me-1"></i>Away Mode Off</span>';
+        }
+
+        let deviceInfo = '<span class="text-muted">—</span>';
+        if (event.switch) {
+            deviceInfo = `
+                <i class="fas fa-plug me-1"></i>${event.switch.name}<br>
+                <small class="text-muted">${event.switch.ip_address}</small>
+            `;
+        }
+
+        const notes = event.notes || '<span class="text-muted">—</span>';
+
+        return `
+            <tr>
+                <td><small class="text-muted">${date}<br>${time}</small></td>
+                <td>${eventBadge}</td>
+                <td>${deviceInfo}</td>
+                <td><small>${notes}</small></td>
+            </tr>
+        `;
+    }).join('');
+}
 </script>
 {% endblock %}

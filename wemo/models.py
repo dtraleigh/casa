@@ -76,21 +76,29 @@ class WemoSwitch(models.Model):
     # --------------------
     # Switch controls
     # --------------------
-    def turn_on(self):
-        return self._soap_request(
+    def turn_on(self, notes=""):
+        result = self._soap_request(
             "urn:Belkin:service:basicevent:1",
             "/upnp/control/basicevent1",
             "SetBinaryState",
-            "<BinaryState>1</BinaryState>"
-        )
+            "<BinaryState>1</BinaryState>")
+        SwitchEvent.objects.create(
+            event_type='switch_on',
+            switch=self,
+            notes=notes)
+        return result
 
-    def turn_off(self):
-        return self._soap_request(
+    def turn_off(self, notes=""):
+        result = self._soap_request(
             "urn:Belkin:service:basicevent:1",
             "/upnp/control/basicevent1",
             "SetBinaryState",
-            "<BinaryState>0</BinaryState>"
-        )
+            "<BinaryState>0</BinaryState>")
+        SwitchEvent.objects.create(
+            event_type='switch_off',
+            switch=self,
+            notes=notes)
+        return result
 
     def get_state(self):
         """
@@ -190,3 +198,39 @@ class AwayModeSettings(models.Model):
         """Get or create the singleton settings instance."""
         settings, created = cls.objects.get_or_create(pk=1)
         return settings
+
+
+class SwitchEvent(models.Model):
+    """Historical log of switch state changes and away mode events."""
+
+    EVENT_TYPES = [
+        ('switch_on', 'Switch Turned On'),
+        ('switch_off', 'Switch Turned Off'),
+        ('away_mode_on', 'Away Mode Enabled'),
+        ('away_mode_off', 'Away Mode Disabled'),
+    ]
+
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPES, help_text="Type of event")
+    timestamp = models.DateTimeField(default=timezone.now, help_text="When the event occurred", db_index=True)
+    switch = models.ForeignKey(
+        WemoSwitch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='events',
+        help_text="Related switch (null for away mode events)"
+    )
+    notes = models.TextField(blank=True, help_text="Additional context (e.g., 'Manual', 'Away Mode', 'Scheduled')")
+
+    class Meta:
+        verbose_name = "Switch Event"
+        verbose_name_plural = "Switch Events"
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['-timestamp', 'event_type']),
+        ]
+
+    def __str__(self):
+        if self.switch:
+            return f"{self.switch.name}: {self.get_event_type_display()} at {self.timestamp}"
+        return f"{self.get_event_type_display()} at {self.timestamp}"
