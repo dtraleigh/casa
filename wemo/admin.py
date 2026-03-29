@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import WemoSwitch, AwayModeSettings
+from .models import WemoSwitch, AwayModeSettings, SwitchAwaySchedule
 
 
 @admin.register(AwayModeSettings)
@@ -51,6 +51,14 @@ class AwayModeSettingsAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         # Don't allow deletion
         return False
+
+
+@admin.register(SwitchAwaySchedule)
+class SwitchAwayScheduleAdmin(admin.ModelAdmin):
+    list_display = ['switch', 'date', 'planned_on_time', 'planned_off_time', 'on_executed', 'off_executed']
+    list_filter = ['date', 'on_executed', 'off_executed']
+    readonly_fields = ['switch', 'date', 'planned_on_time', 'planned_off_time', 'on_executed', 'off_executed']
+    ordering = ['-date', 'planned_on_time']
 
 
 @admin.register(WemoSwitch)

@@ -41,19 +41,15 @@
             <!-- Away Mode Info Card -->
             <div class="card shadow-sm mb-3 {% if away_mode_enabled %}border-primary{% endif %}" id="away-mode-info" style="{% if not away_mode_enabled %}display: none;{% endif %}">
                 <div class="card-body">
-                    <div class="row align-items-center">
-                        <div class="col-md-8">
-                            <h6 class="mb-2">
-                                <i class="fas fa-plane-departure text-primary me-2"></i>
-                                Away Mode Active
-                            </h6>
-                            <small class="text-muted" id="away-mode-details">
-                                Loading schedule information...
-                            </small>
-                        </div>
-                        <div class="col-md-4 text-end">
-                            <span class="badge bg-primary">Automated Control Enabled</span>
-                        </div>
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6 class="mb-0">
+                            <i class="fas fa-plane-departure text-primary me-2"></i>
+                            Away Mode Active
+                        </h6>
+                        <span class="badge bg-primary">Automated Control Enabled</span>
+                    </div>
+                    <div id="away-mode-details">
+                        <small class="text-muted">Loading schedule information...</small>
                     </div>
                 </div>
             </div>
@@ -109,6 +105,27 @@
                                         <i class="fas fa-clock me-1"></i>
                                         Last seen: <span class="last-seen-time">{{ data.switch.last_seen|date:"M d, Y H:i" }}</span>
                                     </small>
+                                </div>
+
+                                <!-- Away Mode Schedule (populated via JS) -->
+                                <div class="away-schedule-info mb-3" data-schedule-switch-id="{{ data.switch.id }}" style="display: none;">
+                                    <div class="border rounded p-2 bg-light">
+                                        <small class="text-primary fw-bold">
+                                            <i class="fas fa-plane-departure me-1"></i>Away Schedule
+                                        </small>
+                                        <div class="mt-1">
+                                            <small class="d-block">
+                                                <i class="fas fa-sun text-warning me-1"></i>
+                                                On: <span class="schedule-on-time">—</span>
+                                                <span class="schedule-on-status"></span>
+                                            </small>
+                                            <small class="d-block">
+                                                <i class="fas fa-moon text-secondary me-1"></i>
+                                                Off: <span class="schedule-off-time">—</span>
+                                                <span class="schedule-off-status"></span>
+                                            </small>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <!-- Controls -->
@@ -314,20 +331,90 @@ document.addEventListener('DOMContentLoaded', function() {
     const awayModeInfo = document.getElementById('away-mode-info');
     const awayModeDetails = document.getElementById('away-mode-details');
 
-    // Fetch and display away mode status
+    // Fetch and display away mode status with per-switch schedules
     function updateAwayModeInfo() {
         fetch('/wemo/away-mode/status/')
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    awayModeDetails.innerHTML = `
-                        <strong>Sunset window:</strong> ${data.sunset_window}<br>
-                        <strong>Off time window:</strong> ${data.off_window}<br>
-                        <small class="text-muted">Lights will turn on randomly around ${data.sunset_time} and off around ${data.off_time}</small>
+                    let html = `
+                        <small>
+                            <strong>Sunset window:</strong> ${data.sunset_window} &nbsp;|&nbsp;
+                            <strong>Off time window:</strong> ${data.off_window}
+                        </small>
                     `;
+
+                    if (data.switch_schedules && data.switch_schedules.length > 0) {
+                        html += `
+                            <div class="table-responsive mt-2">
+                                <table class="table table-sm table-borderless mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th><small>Switch</small></th>
+                                            <th><small><i class="fas fa-sun text-warning me-1"></i>Planned On</small></th>
+                                            <th><small><i class="fas fa-moon text-secondary me-1"></i>Planned Off</small></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                        `;
+                        data.switch_schedules.forEach(sched => {
+                            const onStatus = sched.on_executed
+                                ? '<span class="badge bg-success badge-sm">done</span>'
+                                : '<span class="badge bg-warning text-dark badge-sm">pending</span>';
+                            const offStatus = sched.off_executed
+                                ? '<span class="badge bg-success badge-sm">done</span>'
+                                : '<span class="badge bg-warning text-dark badge-sm">pending</span>';
+                            html += `
+                                <tr>
+                                    <td><small>${sched.switch_name}</small></td>
+                                    <td><small>${sched.planned_on_time || '—'} ${onStatus}</small></td>
+                                    <td><small>${sched.planned_off_time || '—'} ${offStatus}</small></td>
+                                </tr>
+                            `;
+                        });
+                        html += '</tbody></table></div>';
+                    } else {
+                        html += '<br><small class="text-muted">No schedules generated yet. Schedules are created when the management command runs.</small>';
+                    }
+
+                    awayModeDetails.innerHTML = html;
+
+                    // Update per-switch schedule displays on each card
+                    updateSwitchScheduleCards(data.switch_schedules || []);
                 }
             })
             .catch(error => console.error('Error fetching away mode status:', error));
+    }
+
+    function updateSwitchScheduleCards(schedules) {
+        // Hide all schedule info boxes first
+        document.querySelectorAll('.away-schedule-info').forEach(el => {
+            el.style.display = 'none';
+        });
+
+        schedules.forEach(sched => {
+            const el = document.querySelector(`[data-schedule-switch-id="${sched.switch_id}"]`);
+            if (el) {
+                el.style.display = 'block';
+                el.querySelector('.schedule-on-time').textContent = sched.planned_on_time || '—';
+                el.querySelector('.schedule-off-time').textContent = sched.planned_off_time || '—';
+
+                const onStatusEl = el.querySelector('.schedule-on-status');
+                const offStatusEl = el.querySelector('.schedule-off-status');
+                onStatusEl.innerHTML = sched.on_executed
+                    ? '<span class="badge bg-success">done</span>'
+                    : '<span class="badge bg-warning text-dark">pending</span>';
+                offStatusEl.innerHTML = sched.off_executed
+                    ? '<span class="badge bg-success">done</span>'
+                    : '<span class="badge bg-warning text-dark">pending</span>';
+            }
+        });
+    }
+
+    function hideAllSwitchSchedules() {
+        document.querySelectorAll('.away-schedule-info').forEach(el => {
+            el.style.display = 'none';
+        });
     }
 
     // Update info on page load if away mode is enabled
@@ -359,6 +446,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else {
                     awayModeInfo.style.display = 'none';
                     awayModeInfo.classList.remove('border-primary');
+                    hideAllSwitchSchedules();
                 }
             } else {
                 showNotification(data.error || 'Failed to toggle Away Mode', true);

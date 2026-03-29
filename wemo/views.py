@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils import timezone
-from .models import WemoSwitch, AwayModeSettings, SwitchEvent
+from .models import WemoSwitch, AwayModeSettings, SwitchEvent, SwitchAwaySchedule
 import requests
 import logging
 from datetime import datetime, timedelta, time
@@ -382,6 +382,22 @@ def away_mode_status(request):
         off_window_start = off_time - timedelta(minutes=settings.off_window_minutes)
         off_window_end = off_time + timedelta(minutes=settings.off_window_minutes)
 
+        # Get per-switch schedules for today
+        schedules = SwitchAwaySchedule.objects.filter(
+            date=today
+        ).select_related('switch')
+
+        switch_schedules = []
+        for sched in schedules:
+            switch_schedules.append({
+                'switch_id': sched.switch.id,
+                'switch_name': sched.switch.name,
+                'planned_on_time': sched.planned_on_time.astimezone(eastern).strftime('%I:%M %p') if sched.planned_on_time else None,
+                'planned_off_time': sched.planned_off_time.astimezone(eastern).strftime('%I:%M %p') if sched.planned_off_time else None,
+                'on_executed': sched.on_executed,
+                'off_executed': sched.off_executed,
+            })
+
         return JsonResponse({
             'success': True,
             'enabled': settings.enabled,
@@ -391,6 +407,7 @@ def away_mode_status(request):
             'off_window': f"{off_window_start.strftime('%I:%M %p')} - {off_window_end.strftime('%I:%M %p')}",
             'last_sunset_on': settings.last_sunset_on.isoformat() if settings.last_sunset_on else None,
             'last_night_off': settings.last_night_off.isoformat() if settings.last_night_off else None,
+            'switch_schedules': switch_schedules,
         })
     except Exception as e:
         logger.error(f"Error getting away mode status: {e}")

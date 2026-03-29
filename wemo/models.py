@@ -200,6 +200,37 @@ class AwayModeSettings(models.Model):
         return settings
 
 
+class SwitchAwaySchedule(models.Model):
+    """Per-switch scheduled on/off times for away mode each day."""
+
+    switch = models.ForeignKey(
+        'WemoSwitch',
+        on_delete=models.CASCADE,
+        related_name='away_schedules',
+        help_text="The switch this schedule applies to"
+    )
+    date = models.DateField(help_text="The date this schedule is for")
+    planned_on_time = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Planned time to turn this switch on (within sunset window)"
+    )
+    planned_off_time = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Planned time to turn this switch off (within off-time window)"
+    )
+    on_executed = models.BooleanField(default=False, help_text="Whether the on action has been executed")
+    off_executed = models.BooleanField(default=False, help_text="Whether the off action has been executed")
+
+    class Meta:
+        verbose_name = "Switch Away Schedule"
+        verbose_name_plural = "Switch Away Schedules"
+        unique_together = [('switch', 'date')]
+        ordering = ['date', 'planned_on_time']
+
+    def __str__(self):
+        return f"{self.switch.name} - {self.date}"
+
+
 class SwitchEvent(models.Model):
     """Historical log of switch state changes and away mode events."""
 
