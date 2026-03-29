@@ -1,10 +1,13 @@
 # tests.py
 import time
 import os
+from datetime import timedelta
+from unittest.mock import patch
+
 from django.test import TestCase
 from django.utils import timezone
 from django.core.exceptions import ValidationError
-from .models import WemoSwitch
+from .models import WemoSwitch, SwitchEvent
 import requests
 
 
@@ -416,3 +419,185 @@ class WemoSwitchQueryTests(TestCase):
         """Test default ordering by date_added."""
         all_switches = WemoSwitch.objects.all()
         self.assertEqual(all_switches[0], self.disabled_switch)  # Created second, appears first
+
+
+class SwitchEventModelTests(TestCase):
+    """Tests for the SwitchEvent model."""
+
+    def setUp(self):
+        self.switch = WemoSwitch.objects.create(
+            name='Test Switch',
+            ip_address='192.168.1.100',
+            port=49153,
+            serial_number='EVENT_TEST_123',
+            udn='uuid:Event-Test-Device',
+        )
+
+    def test_create_switch_on_event(self):
+        event = SwitchEvent.objects.create(event_type='switch_on', switch=self.switch)
+        self.assertEqual(event.event_type, 'switch_on')
+        self.assertEqual(event.switch, self.switch)
+
+    def test_create_switch_off_event(self):
+        event = SwitchEvent.objects.create(event_type='switch_off', switch=self.switch)
+        self.assertEqual(event.event_type, 'switch_off')
+        self.assertEqual(event.switch, self.switch)
+
+    def test_create_away_mode_on_event(self):
+        event = SwitchEvent.objects.create(event_type='away_mode_on')
+        self.assertEqual(event.event_type, 'away_mode_on')
+        self.assertIsNone(event.switch)
+
+    def test_create_away_mode_off_event(self):
+        event = SwitchEvent.objects.create(event_type='away_mode_off')
+        self.assertEqual(event.event_type, 'away_mode_off')
+        self.assertIsNone(event.switch)
+
+    def test_str_with_switch(self):
+        event = SwitchEvent.objects.create(event_type='switch_on', switch=self.switch)
+        result = str(event)
+        self.assertIn(self.switch.name, result)
+        self.assertIn('Switch Turned On', result)
+
+    def test_str_without_switch(self):
+        event = SwitchEvent.objects.create(event_type='away_mode_on')
+        result = str(event)
+        self.assertIn('Away Mode Enabled', result)
+        self.assertNotIn('Test Switch', result)
+
+    def test_timestamp_auto_populated(self):
+        before = timezone.now()
+        event = SwitchEvent.objects.create(event_type='switch_on', switch=self.switch)
+        after = timezone.now()
+        self.assertIsNotNone(event.timestamp)
+        self.assertGreaterEqual(event.timestamp, before)
+        self.assertLessEqual(event.timestamp, after)
+
+    def test_notes_blank_by_default(self):
+        event = SwitchEvent.objects.create(event_type='switch_on', switch=self.switch)
+        self.assertEqual(event.notes, '')
+
+    def test_notes_with_content(self):
+        event = SwitchEvent.objects.create(
+            event_type='switch_on', switch=self.switch, notes='Manual toggle')
+        self.assertEqual(event.notes, 'Manual toggle')
+
+    def test_cascade_delete_removes_events(self):
+        SwitchEvent.objects.create(event_type='switch_on', switch=self.switch)
+        SwitchEvent.objects.create(event_type='switch_off', switch=self.switch)
+        switch_id = self.switch.pk
+        self.assertEqual(SwitchEvent.objects.filter(switch_id=switch_id).count(), 2)
+        self.switch.delete()
+        self.assertEqual(SwitchEvent.objects.filter(switch_id=switch_id).count(), 0)
+
+    def test_related_name_access(self):
+        SwitchEvent.objects.create(event_type='switch_on', switch=self.switch)
+        SwitchEvent.objects.create(event_type='switch_off', switch=self.switch)
+        self.assertEqual(self.switch.events.count(), 2)
+
+
+class SwitchEventCreationFromMethodsTests(TestCase):
+    """Tests that turn_on/turn_off create SwitchEvent records (mocked SOAP)."""
+
+    def setUp(self):
+        self.switch = WemoSwitch.objects.create(
+            name='Mock Switch',
+            ip_address='192.168.1.200',
+            port=49153,
+            serial_number='MOCK_123',
+            udn='uuid:Mock-Device',
+        )
+
+    @patch('wemo.models.WemoSwitch._soap_request', return_value='<ok/>')
+    def test_turn_on_creates_switch_on_event(self, mock_soap):
+        self.switch.turn_on()
+        self.assertEqual(SwitchEvent.objects.count(), 1)
+        event = SwitchEvent.objects.first()
+        self.assertEqual(event.event_type, 'switch_on')
+        self.assertEqual(event.switch, self.switch)
+
+    @patch('wemo.models.WemoSwitch._soap_request', return_value='<ok/>')
+    def test_turn_off_creates_switch_off_event(self, mock_soap):
+        self.switch.turn_off()
+        self.assertEqual(SwitchEvent.objects.count(), 1)
+        event = SwitchEvent.objects.first()
+        self.assertEqual(event.event_type, 'switch_off')
+        self.assertEqual(event.switch, self.switch)
+
+    @patch('wemo.models.WemoSwitch._soap_request', return_value='<ok/>')
+    def test_turn_on_with_notes(self, mock_soap):
+        self.switch.turn_on(notes='Away Mode')
+        event = SwitchEvent.objects.first()
+        self.assertEqual(event.notes, 'Away Mode')
+
+    @patch('wemo.models.WemoSwitch._soap_request', return_value='<ok/>')
+    def test_turn_off_with_notes(self, mock_soap):
+        self.switch.turn_off(notes='Bedtime')
+        event = SwitchEvent.objects.first()
+        self.assertEqual(event.notes, 'Bedtime')
+
+    @patch('wemo.models.WemoSwitch._soap_request',
+           side_effect=requests.exceptions.ConnectionError('Device unreachable'))
+    def test_soap_failure_no_event_created(self, mock_soap):
+        with self.assertRaises(requests.exceptions.ConnectionError):
+            self.switch.turn_on()
+        self.assertEqual(SwitchEvent.objects.count(), 0)
+
+    @patch('wemo.models.WemoSwitch._soap_request', return_value='<ok/>')
+    def test_multiple_operations_create_multiple_events(self, mock_soap):
+        self.switch.turn_on()
+        self.switch.turn_off()
+        self.assertEqual(SwitchEvent.objects.count(), 2)
+        events = list(SwitchEvent.objects.all())
+        # Default ordering is -timestamp, so most recent (turn_off) is first
+        self.assertEqual(events[0].event_type, 'switch_off')
+        self.assertEqual(events[1].event_type, 'switch_on')
+
+
+class SwitchEventQueryTests(TestCase):
+    """Tests for querying and filtering SwitchEvent records."""
+
+    def setUp(self):
+        self.switch_a = WemoSwitch.objects.create(
+            name='Switch A', ip_address='192.168.1.100', port=49153,
+            serial_number='QUERY_A', udn='uuid:Query-A',
+        )
+        self.switch_b = WemoSwitch.objects.create(
+            name='Switch B', ip_address='192.168.1.101', port=49153,
+            serial_number='QUERY_B', udn='uuid:Query-B',
+        )
+        now = timezone.now()
+        self.event1 = SwitchEvent.objects.create(
+            event_type='switch_on', switch=self.switch_a,
+            timestamp=now - timedelta(hours=3))
+        self.event2 = SwitchEvent.objects.create(
+            event_type='switch_off', switch=self.switch_a,
+            timestamp=now - timedelta(hours=2))
+        self.event3 = SwitchEvent.objects.create(
+            event_type='switch_on', switch=self.switch_b,
+            timestamp=now - timedelta(hours=1))
+        self.event4 = SwitchEvent.objects.create(
+            event_type='away_mode_on',
+            timestamp=now)
+
+    def test_default_ordering_most_recent_first(self):
+        events = list(SwitchEvent.objects.all())
+        self.assertEqual(events[0], self.event4)
+        self.assertEqual(events[-1], self.event1)
+
+    def test_filter_by_event_type(self):
+        on_events = SwitchEvent.objects.filter(event_type='switch_on')
+        self.assertEqual(on_events.count(), 2)
+        for event in on_events:
+            self.assertEqual(event.event_type, 'switch_on')
+
+    def test_filter_by_switch(self):
+        a_events = SwitchEvent.objects.filter(switch=self.switch_a)
+        self.assertEqual(a_events.count(), 2)
+        for event in a_events:
+            self.assertEqual(event.switch, self.switch_a)
+
+    def test_filter_away_mode_events_no_switch(self):
+        away_events = SwitchEvent.objects.filter(switch__isnull=True)
+        self.assertEqual(away_events.count(), 1)
+        self.assertEqual(away_events.first().event_type, 'away_mode_on')

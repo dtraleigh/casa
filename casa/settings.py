@@ -51,6 +51,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'casa.wsgi.application'
 
+# You are running only one DB, on the server, not locally
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
