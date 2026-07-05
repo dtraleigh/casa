@@ -8,7 +8,7 @@ environ.Env.read_env(BASE_DIR / ".env")
 SECRET_KEY = env("SECRET")
 DEBUG = True
 
-ALLOWED_HOSTS = ['casa.leoandjen.com', '192.168.x.x', '127.0.0.1']
+ALLOWED_HOSTS = ['casa.leoandjen.com', '192.168.1.2', '127.0.0.1', 'emo-server', 'localhost']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -18,7 +18,8 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'core',
-    'wemo'
+    'wemo',
+    'ai_lab_core'
 ]
 
 MIDDLEWARE = [
@@ -57,11 +58,21 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'django_project2',
         'USER': 'django_user',
-        "PASSWORD": env("CASA_DB_PASS"),
+        'PASSWORD': env("CASA_DB_PASS"),
         'HOST': '127.0.0.1',
-        'PORT': '5433',
-    }
+        'PORT': '5432',
+    },
+    'ai_lab': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'ai_lab',
+        'USER': 'ai_lab_user',
+        'PASSWORD': env("AI_LAB_DB_PASS"),
+        'HOST': '127.0.0.1',
+        'PORT': '5432',
+    },
 }
+
+DATABASE_ROUTERS = ['ai_lab_core.routers.AiLabRouter']
 
 AUTH_PASSWORD_VALIDATORS = [
     {
