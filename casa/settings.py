@@ -19,7 +19,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'core',
     'wemo',
-    'ai_lab_core'
+    'ai_lab_core',
+    'ai_lab_chatbot',
 ]
 
 MIDDLEWARE = [
@@ -99,6 +100,11 @@ STATIC_ROOT = '/home/leo/workspace/casa/static'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Ollama (AI Lab / Mycroft). Django and Ollama run on the same box (emo-server),
+# so localhost is the default; override in .env if Django runs elsewhere.
+OLLAMA_HOST = env("OLLAMA_HOST", default="http://localhost:11434")
+OLLAMA_CHAT_MODEL = env("OLLAMA_CHAT_MODEL", default="llama3.1:8b")
+
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = 'login'
@@ -143,6 +149,11 @@ LOGGING = {
         'core.views': {
             'handlers': ['file'],
             'level': 'DEBUG',
+            'propagate': False,
+        },
+        'ai_lab_chatbot.views': {
+            'handlers': ['file'],
+            'level': 'INFO',
             'propagate': False,
         },
         'away_mode': {

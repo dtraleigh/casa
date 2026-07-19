@@ -19,6 +19,10 @@
                        href="{% url 'wemo:main' %}">Wemo</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if request.resolver_match.app_name == 'ai_lab_chatbot' %}active{% endif %}"
+                       href="{% url 'ai_lab_chatbot:chat' %}">Mycroft</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link" href="{% url 'logout' %}">Logout</a>
                 </li>
             </ul>

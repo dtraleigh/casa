@@ -1,0 +1,221 @@
+{% extends 'base.html' %}
+{% block title %}Mycroft{% endblock %}
+
+{% block content %}
+{% csrf_token %}
+<div id="chat-wrap" class="container-fluid px-3 px-lg-4 py-3 d-flex flex-column">
+    <div class="card shadow-sm flex-grow-1 d-flex flex-column overflow-hidden">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+            <span class="fw-bold">Mycroft</span>
+            <div class="d-flex align-items-center gap-2">
+                <label for="width-select" class="small text-white-50 mb-0">Width</label>
+                <select id="width-select" class="form-select form-select-sm w-auto">
+                    <option value="narrow">Narrow</option>
+                    <option value="medium">Medium</option>
+                    <option value="wide">Wide</option>
+                    <option value="full">Full</option>
+                </select>
+            </div>
+        </div>
+        <div id="messages" class="card-body overflow-auto flex-grow-1">
+            <div class="text-muted small text-center my-auto">
+                Say something to start. This conversation resets when you
+                reload the page.
+            </div>
+        </div>
+        <div class="card-footer">
+            <form id="chat-form" class="input-group align-items-end">
+                <textarea id="chat-input" class="form-control" rows="1"
+                          placeholder="Message Mycroft…" autocomplete="off"
+                          style="resize: none; max-height: 40vh;"
+                          autofocus></textarea>
+                <button id="send-btn" class="btn btn-primary" type="submit">
+                    Send
+                </button>
+            </form>
+            <div class="form-text small mt-1">
+                Enter to send · Shift+Enter for a new line
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('send-btn');
+    const messagesEl = document.getElementById('messages');
+
+    // Running history for this page load — sent in full on every turn.
+    const messages = [];
+    let firstMessage = true;
+
+    // Fill the viewport below the navbar. Measure the navbar rather than
+    // hardcoding its height — it changes with breakpoint and font metrics.
+    const chatWrap = document.getElementById('chat-wrap');
+    function sizeChat() {
+        const nav = document.querySelector('.navbar');
+        const navH = nav ? nav.offsetHeight : 0;
+        chatWrap.style.height = (window.innerHeight - navH) + 'px';
+    }
+    window.addEventListener('resize', sizeChat);
+    sizeChat();
+
+    // Chat width, remembered per browser. 'full' leaves the wrapper edge-to-edge;
+    // the others cap max-width and centre it. sizeChat() still handles height.
+    const WIDTHS = { narrow: '720px', medium: '1000px', wide: '1400px', full: '' };
+    const widthSelect = document.getElementById('width-select');
+    function applyWidth(key) {
+        const mw = WIDTHS[key] || '';
+        chatWrap.style.maxWidth = mw;
+        chatWrap.style.marginLeft = mw ? 'auto' : '';
+        chatWrap.style.marginRight = mw ? 'auto' : '';
+    }
+    const savedWidth = localStorage.getItem('mycroft-chat-width') || 'full';
+    widthSelect.value = savedWidth;
+    applyWidth(savedWidth);
+    widthSelect.addEventListener('change', function () {
+        localStorage.setItem('mycroft-chat-width', widthSelect.value);
+        applyWidth(widthSelect.value);
+    });
+
+    function addBubble(role, text) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'd-flex mb-3 ' +
+            (role === 'user' ? 'justify-content-end' : 'justify-content-start');
+        const bubble = document.createElement('div');
+        bubble.className = 'p-2 px-3 rounded ' +
+            (role === 'user' ? 'bg-primary text-white' : 'bg-light border');
+        bubble.style.maxWidth = '80%';
+        bubble.style.whiteSpace = 'pre-wrap';
+        bubble.textContent = text;
+        wrapper.appendChild(bubble);
+        messagesEl.appendChild(wrapper);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return bubble;
+    }
+
+    function addNotice(text) {
+        const notice = document.createElement('div');
+        notice.className = 'text-danger small text-center mb-3';
+        notice.textContent = text;
+        messagesEl.appendChild(notice);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function setBusy(busy) {
+        input.disabled = busy;
+        sendBtn.disabled = busy;
+        if (!busy) input.focus();
+    }
+
+    // Grow the textarea to fit its content (capped by max-height in CSS, after
+    // which it scrolls). Reset to 'auto' first so it can shrink as well as grow.
+    function autoGrow() {
+        input.style.height = 'auto';
+        input.style.height = input.scrollHeight + 'px';
+    }
+    input.addEventListener('input', autoGrow);
+
+    // Enter sends; Shift+Enter inserts a newline (the browser default).
+    input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            form.requestSubmit();
+        }
+    });
+
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+
+        if (firstMessage) {
+            messagesEl.innerHTML = '';
+            firstMessage = false;
+        }
+
+        addBubble('user', text);
+        messages.push({ role: 'user', content: text });
+        input.value = '';
+        autoGrow();  // collapse back to a single row
+        setBusy(true);
+
+        const assistantBubble = addBubble('assistant', '');
+        let assistantText = '';
+        let completed = false;
+        let notice = null;
+
+        try {
+            const resp = await fetch('/mycroft/send/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrftoken,
+                },
+                body: JSON.stringify({ messages: messages }),
+            });
+
+            if (!resp.ok) {
+                throw new Error('Request failed: ' + resp.status);
+            }
+
+            // Read newline-delimited JSON frames. Anything that isn't a frame
+            // we recognise is discarded rather than shown — a killed worker or
+            // a proxy can write an error page onto this connection, and it must
+            // never reach the chat bubble or the history.
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                const lines = buffer.split('\n');
+                buffer = lines.pop();  // trailing partial line, if any
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    let frame;
+                    try {
+                        frame = JSON.parse(line);
+                    } catch (e) {
+                        continue;  // not ours — ignore it
+                    }
+                    if (frame.type === 'token') {
+                        assistantText += frame.content;
+                        assistantBubble.textContent = assistantText;
+                    } else if (frame.type === 'error') {
+                        notice = 'Mycroft hit an error and stopped.';
+                    } else if (frame.type === 'done') {
+                        completed = true;
+                    }
+                }
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
+        } catch (err) {
+            notice = 'Could not reach Mycroft. Check that Ollama is running.';
+        }
+
+        if (!completed && !notice) {
+            notice = 'Mycroft was cut off mid-response.';
+        }
+
+        if (assistantText) {
+            messages.push({ role: 'assistant', content: assistantText });
+        } else {
+            // Nothing usable came back — drop the user turn so the next send
+            // doesn't repeat it against a half-formed history.
+            messages.pop();
+        }
+
+        if (notice) addNotice(notice);
+        setBusy(false);
+    });
+});
+</script>
+{% endblock %}
