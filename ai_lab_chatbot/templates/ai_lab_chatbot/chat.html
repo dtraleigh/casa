@@ -105,10 +105,15 @@ document.addEventListener('DOMContentLoaded', function () {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
+    // Touch devices: focusing the textarea pops the on-screen keyboard, so
+    // don't auto-focus after a reply — let the user tap to type. Desktop keeps
+    // the convenience of a ready-to-type field.
+    const hasTouchKeyboard = window.matchMedia('(pointer: coarse)').matches;
+
     function setBusy(busy) {
         input.disabled = busy;
         sendBtn.disabled = busy;
-        if (!busy) input.focus();
+        if (!busy && !hasTouchKeyboard) input.focus();
     }
 
     // Grow the textarea to fit its content (capped by max-height in CSS, after
@@ -137,13 +142,18 @@ document.addEventListener('DOMContentLoaded', function () {
             firstMessage = false;
         }
 
-        addBubble('user', text);
+        const userBubble = addBubble('user', text);
         messages.push({ role: 'user', content: text });
         input.value = '';
         autoGrow();  // collapse back to a single row
         setBusy(true);
 
         const assistantBubble = addBubble('assistant', '');
+        // Pin the just-sent message near the top of the view so the reply
+        // streams into the space below it. We deliberately do NOT auto-scroll
+        // as tokens arrive — that would drag the view down through a long
+        // response and force the reader back up to the start.
+        userBubble.parentElement.scrollIntoView({ block: 'start' });
         let assistantText = '';
         let completed = false;
         let notice = null;
@@ -195,7 +205,6 @@ document.addEventListener('DOMContentLoaded', function () {
                         completed = true;
                     }
                 }
-                messagesEl.scrollTop = messagesEl.scrollHeight;
             }
         } catch (err) {
             notice = 'Could not reach Mycroft. Check that Ollama is running.';
