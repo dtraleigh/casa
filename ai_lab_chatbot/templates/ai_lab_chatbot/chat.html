@@ -105,6 +105,133 @@ document.addEventListener('DOMContentLoaded', function () {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
+    // Copy to clipboard. navigator.clipboard only exists in a secure context
+    // (https or localhost); over plain http on the LAN it's undefined, so fall
+    // back to a hidden textarea + execCommand.
+    function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        }
+        return new Promise(function (resolve, reject) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            let ok;
+            try {
+                ok = document.execCommand('copy');
+            } catch (e) {
+                ok = false;
+            }
+            document.body.removeChild(ta);
+            ok ? resolve() : reject();
+        });
+    }
+
+    // Split assistant text into plain-text and fenced-code (```lang) segments.
+    // Runs on the accumulated text every token, so it must tolerate a fence
+    // that hasn't closed yet — an in-progress block renders as code as it
+    // streams and simply completes when the closing fence arrives.
+    function parseSegments(text) {
+        const segments = [];
+        let i = 0;
+        while (i < text.length) {
+            const fenceStart = text.indexOf('```', i);
+            if (fenceStart === -1) {
+                segments.push({ type: 'text', content: text.slice(i) });
+                break;
+            }
+            if (fenceStart > i) {
+                segments.push({ type: 'text', content: text.slice(i, fenceStart) });
+            }
+            // Language sits on the rest of the opening-fence line.
+            const langEnd = text.indexOf('\n', fenceStart + 3);
+            if (langEnd === -1) {
+                // Opening fence with no newline yet — still streaming the lang.
+                segments.push({ type: 'code', lang: text.slice(fenceStart + 3).trim(), content: '' });
+                break;
+            }
+            const lang = text.slice(fenceStart + 3, langEnd).trim();
+            const bodyStart = langEnd + 1;
+            const fenceEnd = text.indexOf('```', bodyStart);
+            if (fenceEnd === -1) {
+                // Unterminated block — render what we have so far.
+                segments.push({ type: 'code', lang: lang, content: text.slice(bodyStart) });
+                break;
+            }
+            let code = text.slice(bodyStart, fenceEnd);
+            if (code.endsWith('\n')) code = code.slice(0, -1);  // drop the newline before the closing fence
+            segments.push({ type: 'code', lang: lang, content: code });
+            i = fenceEnd + 3;
+        }
+        return segments;
+    }
+
+    function makeCodeBlock(code, lang) {
+        const container = document.createElement('div');
+        container.className = 'my-2 rounded overflow-hidden border';
+
+        const header = document.createElement('div');
+        header.className = 'd-flex justify-content-between align-items-center px-3 py-1';
+        header.style.background = '#2d2d2d';
+        header.style.color = '#ccc';
+        header.style.fontSize = '0.75rem';
+
+        const label = document.createElement('span');
+        label.textContent = lang || 'code';
+        header.appendChild(label);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'btn btn-sm btn-outline-light py-0 px-2';
+        copyBtn.style.fontSize = '0.75rem';
+        copyBtn.textContent = 'Copy';
+        copyBtn.addEventListener('click', function () {
+            copyText(code).then(function () {
+                copyBtn.textContent = 'Copied!';
+            }).catch(function () {
+                copyBtn.textContent = 'Failed';
+            });
+            setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
+        });
+        header.appendChild(copyBtn);
+
+        const pre = document.createElement('pre');
+        pre.className = 'mb-0 p-3';
+        pre.style.background = '#1e1e1e';
+        pre.style.color = '#f8f8f2';
+        pre.style.overflowX = 'auto';
+        pre.style.whiteSpace = 'pre';
+        const codeEl = document.createElement('code');
+        codeEl.textContent = code;
+        pre.appendChild(codeEl);
+
+        container.appendChild(header);
+        container.appendChild(pre);
+        return container;
+    }
+
+    // Render assistant text into the bubble, turning fenced code into copyable
+    // blocks. Everything is set via textContent — model output is never treated
+    // as HTML. Re-run wholesale on each token (cheap for a single-user app).
+    function renderMessage(bubble, text) {
+        bubble.textContent = '';
+        for (const seg of parseSegments(text)) {
+            if (seg.type === 'code') {
+                bubble.appendChild(makeCodeBlock(seg.content, seg.lang));
+            } else {
+                const cleaned = seg.content.replace(/^\n+|\n+$/g, '');
+                if (!cleaned) continue;
+                const span = document.createElement('span');
+                span.textContent = cleaned;
+                bubble.appendChild(span);
+            }
+        }
+    }
+
     // Touch devices: focusing the textarea pops the on-screen keyboard, so
     // don't auto-focus after a reply — let the user tap to type. Desktop keeps
     // the convenience of a ready-to-type field.
@@ -198,7 +325,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     }
                     if (frame.type === 'token') {
                         assistantText += frame.content;
-                        assistantBubble.textContent = assistantText;
+                        renderMessage(assistantBubble, assistantText);
                     } else if (frame.type === 'error') {
                         notice = 'Mycroft hit an error and stopped.';
                     } else if (frame.type === 'done') {
