@@ -105,6 +105,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 OLLAMA_HOST = env("OLLAMA_HOST", default="http://localhost:11434")
 OLLAMA_CHAT_MODEL = env("OLLAMA_CHAT_MODEL", default="llama3.1:8b")
 
+# How many trailing messages of a conversation are sent to Ollama as context
+# (the sliding window). The full transcript is always stored and displayed.
+MYCROFT_HISTORY_WINDOW = env.int("MYCROFT_HISTORY_WINDOW", default=20)
+
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = 'login'

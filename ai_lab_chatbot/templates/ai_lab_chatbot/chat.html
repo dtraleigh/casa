@@ -3,11 +3,14 @@
 
 {% block content %}
 {% csrf_token %}
+{{ bootstrap|json_script:"mycroft-bootstrap" }}
 <div id="chat-wrap" class="container-fluid px-3 px-lg-4 py-3 d-flex flex-column">
     <div class="card shadow-sm flex-grow-1 d-flex flex-column overflow-hidden">
-        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
-            <span class="fw-bold">Mycroft</span>
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span class="fw-bold text-truncate" id="conv-title" style="max-width: 40%;">Mycroft</span>
             <div class="d-flex align-items-center gap-2">
+                <a href="{% url 'ai_lab_chatbot:chat' %}" class="btn btn-sm btn-outline-light">New</a>
+                <a href="{% url 'ai_lab_chatbot:history' %}" class="btn btn-sm btn-outline-light">History</a>
                 <label for="width-select" class="small text-white-50 mb-0">Width</label>
                 <select id="width-select" class="form-select form-select-sm w-auto">
                     <option value="narrow">Narrow</option>
@@ -19,8 +22,8 @@
         </div>
         <div id="messages" class="card-body overflow-auto flex-grow-1">
             <div class="text-muted small text-center my-auto">
-                Say something to start. This conversation resets when you
-                reload the page.
+                Say something to start. Conversations are saved — find past
+                ones under History.
             </div>
         </div>
         <div class="card-footer">
@@ -47,10 +50,14 @@ document.addEventListener('DOMContentLoaded', function () {
     const input = document.getElementById('chat-input');
     const sendBtn = document.getElementById('send-btn');
     const messagesEl = document.getElementById('messages');
+    const titleEl = document.getElementById('conv-title');
 
-    // Running history for this page load — sent in full on every turn.
-    const messages = [];
+    // Server owns history now. We track only the current conversation id (null
+    // until the first send persists one) and whether the placeholder is showing.
+    const boot = JSON.parse(document.getElementById('mycroft-bootstrap').textContent);
+    let conversationId = boot.conversation_id;   // null on a fresh page
     let firstMessage = true;
+    if (boot.title) titleEl.textContent = boot.title;
 
     // Fill the viewport below the navbar. Measure the navbar rather than
     // hardcoding its height — it changes with breakpoint and font metrics.
@@ -259,6 +266,36 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
+    // Render a resumed conversation's transcript (assistant turns through
+    // renderMessage so stored code blocks come back formatted).
+    if (boot.messages.length) {
+        messagesEl.innerHTML = '';
+        firstMessage = false;
+        for (const m of boot.messages) {
+            if (m.role === 'assistant') {
+                renderMessage(addBubble('assistant', ''), m.content);
+            } else {
+                addBubble('user', m.content);
+            }
+        }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    // After the first exchange, ask the server for a short title (a separate
+    // non-streaming call). Failure is harmless — the header keeps its default
+    // and history falls back to a message snippet.
+    async function generateTitle() {
+        try {
+            const resp = await fetch(
+                '/mycroft/conversation/' + conversationId + '/title/',
+                { method: 'POST', headers: { 'X-CSRFToken': csrftoken } }
+            );
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.title) titleEl.textContent = data.title;
+        } catch (e) { /* leave the default title */ }
+    }
+
     form.addEventListener('submit', async function (e) {
         e.preventDefault();
         const text = input.value.trim();
@@ -270,7 +307,6 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         const userBubble = addBubble('user', text);
-        messages.push({ role: 'user', content: text });
         input.value = '';
         autoGrow();  // collapse back to a single row
         setBusy(true);
@@ -284,6 +320,11 @@ document.addEventListener('DOMContentLoaded', function () {
         let assistantText = '';
         let completed = false;
         let notice = null;
+        // The server reports the conversation id on the terminal frame (a fresh
+        // chat learns its id here); is_new marks the first exchange.
+        let respConvId = null;
+        let respIsNew = false;
+        const wasNew = !conversationId;
 
         try {
             const resp = await fetch('/mycroft/send/', {
@@ -292,7 +333,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': csrftoken,
                 },
-                body: JSON.stringify({ messages: messages }),
+                body: JSON.stringify({
+                    conversation_id: conversationId,
+                    content: text,
+                }),
             });
 
             if (!resp.ok) {
@@ -323,6 +367,12 @@ document.addEventListener('DOMContentLoaded', function () {
                     } catch (e) {
                         continue;  // not ours — ignore it
                     }
+                    // A frame may carry the conversation id (done, and error) —
+                    // adopt it so a fresh chat knows what it became.
+                    if (frame.conversation_id) {
+                        respConvId = frame.conversation_id;
+                        respIsNew = frame.is_new;
+                    }
                     if (frame.type === 'token') {
                         assistantText += frame.content;
                         renderMessage(assistantBubble, assistantText);
@@ -341,12 +391,23 @@ document.addEventListener('DOMContentLoaded', function () {
             notice = 'Mycroft was cut off mid-response.';
         }
 
-        if (assistantText) {
-            messages.push({ role: 'assistant', content: assistantText });
-        } else {
-            // Nothing usable came back — drop the user turn so the next send
-            // doesn't repeat it against a half-formed history.
-            messages.pop();
+        // The server persists turns itself; the browser only tracks the id.
+        if (respConvId) conversationId = respConvId;
+        if (!assistantText) {
+            // Nothing came back — drop the empty assistant bubble (the user turn
+            // stays; the server already recorded it as part of the transcript).
+            assistantBubble.parentElement.remove();
+        }
+
+        // First send of a fresh chat: point the URL at the now-persisted
+        // conversation (so a refresh resumes it) and generate its title.
+        if (wasNew && conversationId) {
+            history.replaceState(
+                null, '', '/mycroft/conversation/' + conversationId + '/'
+            );
+        }
+        if (respIsNew && conversationId && assistantText) {
+            generateTitle();
         }
 
         if (notice) addNotice(notice);

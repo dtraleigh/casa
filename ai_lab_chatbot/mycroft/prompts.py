@@ -54,3 +54,24 @@ def build_system_prompt(user) -> str:
     sections.append(STANDARD_GUARDRAILS)
 
     return "\n\n".join(sections)
+
+
+def build_title_prompt(first_user, first_assistant):
+    """Messages asking Mycroft to name a conversation from its first exchange.
+
+    Returns a small message list for a non-streaming completion. Kept terse and
+    self-contained (no personality) so the title stays a plain label.
+    """
+    exchange = f"User: {first_user}\n\nAssistant: {first_assistant}"
+    return [
+        {
+            'role': 'system',
+            'content': (
+                "You write short conversation titles. Given the first exchange "
+                "of a chat, reply with a title of at most 5 words that captures "
+                "the topic. Reply with the title only — no quotes, no punctuation "
+                "at the end, no preamble."
+            ),
+        },
+        {'role': 'user', 'content': exchange},
+    ]

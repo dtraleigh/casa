@@ -1,0 +1,129 @@
+{% extends 'base.html' %}
+{% block title %}Mycroft — History{% endblock %}
+
+{% block content %}
+{% csrf_token %}
+<style>
+    /* The `extra_css` block lives inside an {% templatetag openblock %} include {% templatetag closeblock %}d
+       partial and can't be overridden from here, so this rides in the content
+       block instead. The Bootstrap Icons stylesheet is loaded globally in head.html. */
+    .fav-star {
+        box-shadow: none !important;
+        text-decoration: none;
+    }
+    .fav-star .bi {
+        font-size: 1.4rem;
+        line-height: 1;
+        color: #6c757d;            /* outlined + muted when not a favorite */
+        transition: color .12s ease, transform .08s ease;
+    }
+    .fav-star:hover .bi { color: #f5c518; }
+    .fav-star:active .bi { transform: scale(0.85); }
+    .fav-star.is-fav .bi { color: #f5c518; }  /* filled gold */
+</style>
+<div class="container py-4" style="max-width: 900px;">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1 class="h4 mb-0">Conversations</h1>
+        <a href="{% url 'ai_lab_chatbot:chat' %}" class="btn btn-primary btn-sm">
+            New conversation
+        </a>
+    </div>
+
+    {% if favorites or conversations %}
+        <div id="fav-section" class="mb-4 {% if not favorites %}d-none{% endif %}">
+            <h2 class="h6 text-uppercase text-muted mb-2">Favorites</h2>
+            <div id="fav-list" class="list-group shadow-sm">
+                {% for c in favorites %}
+                    {% include 'ai_lab_chatbot/_conversation_row.html' %}
+                {% endfor %}
+            </div>
+        </div>
+
+        <div id="other-section">
+            <h2 class="h6 text-uppercase text-muted mb-2">All conversations</h2>
+            <div id="other-list" class="list-group shadow-sm">
+                {% for c in conversations %}
+                    {% include 'ai_lab_chatbot/_conversation_row.html' %}
+                {% endfor %}
+            </div>
+            <div id="other-empty" class="text-muted small py-3 {% if conversations %}d-none{% endif %}">
+                Nothing here — all your conversations are favorited.
+            </div>
+        </div>
+    {% else %}
+        <div class="text-muted text-center py-5">
+            No conversations yet.
+            <a href="{% url 'ai_lab_chatbot:chat' %}">Start one.</a>
+        </div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const tokenEl = document.querySelector('[name=csrfmiddlewaretoken]');
+    const csrftoken = tokenEl ? tokenEl.value : '';
+    const favSection = document.getElementById('fav-section');
+    const favList = document.getElementById('fav-list');
+    const otherList = document.getElementById('other-list');
+    const otherEmpty = document.getElementById('other-empty');
+    if (!favList || !otherList) return;  // empty page — nothing to toggle
+
+    // Insert `row` into `list` keeping updated_at descending. data-updated is
+    // ISO 8601; parse to a timestamp so absent-microsecond formats still order
+    // correctly.
+    function reorderInsert(list, row) {
+        const updated = Date.parse(row.dataset.updated);
+        for (const child of list.children) {
+            if (child === row || !child.dataset.updated) continue;
+            if (Date.parse(child.dataset.updated) < updated) {
+                list.insertBefore(row, child);
+                return;
+            }
+        }
+        list.appendChild(row);
+    }
+
+    function refreshSections() {
+        favSection.classList.toggle('d-none', favList.children.length === 0);
+        if (otherEmpty) {
+            otherEmpty.classList.toggle('d-none', otherList.children.length > 0);
+        }
+    }
+
+    function onToggle(btn) {
+        const row = btn.closest('.list-group-item');
+        btn.disabled = true;
+        fetch(btn.dataset.url, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrftoken },
+        }).then(function (r) {
+            if (!r.ok) throw new Error('Request failed');
+            return r.json();
+        }).then(function (data) {
+            const fav = data.is_favorite;
+            btn.classList.toggle('is-fav', fav);
+            btn.setAttribute('aria-pressed', fav ? 'true' : 'false');
+            const icon = btn.querySelector('.bi');
+            if (icon) {
+                icon.classList.toggle('bi-star-fill', fav);
+                icon.classList.toggle('bi-star', !fav);
+            }
+            reorderInsert(fav ? favList : otherList, row);
+            refreshSections();
+        }).catch(function () {
+            /* leave the row where it is on failure */
+        }).finally(function () {
+            btn.disabled = false;
+        });
+    }
+
+    // Delegated so it keeps working after rows are moved between lists.
+    document.addEventListener('click', function (e) {
+        const btn = e.target.closest('.fav-star');
+        if (!btn) return;
+        e.preventDefault();
+        onToggle(btn);
+    });
+});
+</script>
+{% endblock %}

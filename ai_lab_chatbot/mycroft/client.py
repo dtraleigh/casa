@@ -27,3 +27,17 @@ def stream_chat(messages):
         piece = chunk.message.content
         if piece:
             yield piece
+
+
+def complete_chat(messages) -> str:
+    """Non-streaming chat completion, returned as a single string.
+
+    Used for short off-band calls (e.g. generating a conversation title) that
+    shouldn't tie up the streaming path.
+    """
+    resp = _client().chat(
+        model=settings.OLLAMA_CHAT_MODEL,
+        messages=messages,
+        stream=False,
+    )
+    return (resp.message.content or '').strip()

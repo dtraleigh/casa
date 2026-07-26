@@ -1,0 +1,26 @@
+{% comment %}
+One conversation row for the History page, shared by the Favorites and
+All-conversations sections. `data-updated` (ISO 8601, UTC) lets the JS re-insert
+the row in updated_at-descending order when its favorite state is toggled.
+{% endcomment %}
+<div class="list-group-item d-flex align-items-center gap-2"
+     data-updated="{{ c.updated_at.isoformat }}">
+    <button type="button"
+            class="fav-star btn btn-link p-0 lh-1 {% if c.is_favorite %}is-fav{% endif %}"
+            data-url="{% url 'ai_lab_chatbot:favorite' c.id %}"
+            aria-label="Toggle favorite"
+            aria-pressed="{% if c.is_favorite %}true{% else %}false{% endif %}"
+            title="Favorite">
+        <i class="bi {% if c.is_favorite %}bi-star-fill{% else %}bi-star{% endif %}"></i>
+    </button>
+    <a href="{% url 'ai_lab_chatbot:conversation' c.id %}"
+       class="flex-grow-1 text-decoration-none text-body">
+        <div class="fw-semibold">{{ c.display_title }}</div>
+        <div class="small text-muted">{{ c.updated_at|timesince }} ago</div>
+    </a>
+    <form method="post" action="{% url 'ai_lab_chatbot:delete' c.id %}"
+          onsubmit="return confirm('Delete this conversation? This cannot be undone.');">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
+    </form>
+</div>
