@@ -104,6 +104,18 @@ document.addEventListener('DOMContentLoaded', function () {
         return bubble;
     }
 
+    // Show a "still working" indicator in an as-yet-empty assistant bubble.
+    // renderMessage() clears the bubble via textContent on the first token, so
+    // the indicator disappears the moment real output starts — no manual removal
+    // on the happy path. This fragment is fixed, developer-authored markup with
+    // no user/model data, so innerHTML is safe here.
+    function showThinking(bubble) {
+        bubble.innerHTML =
+            '<span class="spinner-grow spinner-grow-sm text-secondary me-2"' +
+            ' role="status" aria-hidden="true"></span>' +
+            '<span class="text-muted">Thinking…</span>';
+    }
+
     function addNotice(text) {
         const notice = document.createElement('div');
         notice.className = 'text-danger small text-center mb-3';
@@ -312,6 +324,7 @@ document.addEventListener('DOMContentLoaded', function () {
         setBusy(true);
 
         const assistantBubble = addBubble('assistant', '');
+        showThinking(assistantBubble);
         // Pin the just-sent message near the top of the view so the reply
         // streams into the space below it. We deliberately do NOT auto-scroll
         // as tokens arrive — that would drag the view down through a long
