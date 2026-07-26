@@ -1,6 +1,8 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -9,6 +11,7 @@ from ai_lab_chatbot.models import (
     Personality, HouseholdFact, UserContext, Conversation, Message,
 )
 from ai_lab_chatbot.mycroft import memory
+from ai_lab_chatbot.mycroft.client import stream_chat
 from ai_lab_chatbot.mycroft.prompts import build_system_prompt, STANDARD_GUARDRAILS
 
 
@@ -196,6 +199,48 @@ class MemoryTests(TestCase):
         self.assertTrue(Conversation.objects.filter(id=conv.id).exists())
 
 
+class StreamChatStatsTests(TestCase):
+    """The client wrapper: num_ctx is sent, and the final chunk's metrics land
+    in stats_out with durations converted from nanoseconds to milliseconds."""
+
+    @staticmethod
+    def _chunk(content, done=False, **metrics):
+        return SimpleNamespace(
+            message=SimpleNamespace(content=content), done=done, **metrics)
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_sends_num_ctx_and_captures_final_metrics(self, mock_client):
+        chunks = [
+            self._chunk('Hello'),
+            self._chunk(' world'),
+            self._chunk('', done=True, prompt_eval_count=1500, eval_count=300,
+                        eval_duration=5_000_000_000, total_duration=6_000_000_000),
+        ]
+        mock_client.return_value.chat.return_value = iter(chunks)
+
+        stats = {}
+        out = list(stream_chat([{'role': 'user', 'content': 'hi'}], stats_out=stats))
+
+        self.assertEqual(out, ['Hello', ' world'])
+        self.assertEqual(
+            mock_client.return_value.chat.call_args.kwargs['options'],
+            {'num_ctx': settings.MYCROFT_NUM_CTX},
+        )
+        self.assertEqual(stats['prompt_tokens'], 1500)
+        self.assertEqual(stats['completion_tokens'], 300)
+        self.assertEqual(stats['eval_duration_ms'], 5000.0)   # ns → ms
+        self.assertEqual(stats['total_duration_ms'], 6000.0)
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_stats_out_optional(self, mock_client):
+        mock_client.return_value.chat.return_value = iter([
+            self._chunk('hi', done=True, prompt_eval_count=1, eval_count=1,
+                        eval_duration=0, total_duration=0),
+        ])
+        # No stats_out passed — must not raise.
+        self.assertEqual(list(stream_chat([])), ['hi'])
+
+
 class SendMessageViewTests(TestCase):
     databases = DBS
 
@@ -213,6 +258,16 @@ class SendMessageViewTests(TestCase):
     def _frames(self, resp):
         body = b''.join(resp.streaming_content).decode()
         return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+    @staticmethod
+    def _stream_with_stats(tokens, stats):
+        """A stream_chat stand-in that yields `tokens` and fills the caller's
+        stats_out dict, mirroring a clean Ollama completion."""
+        def _side_effect(messages, stats_out=None):
+            if stats_out is not None:
+                stats_out.update(stats)
+            return iter(tokens)
+        return _side_effect
 
     def test_requires_login(self):
         resp = self._post(conversation_id=None, content='hi')
@@ -290,6 +345,60 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch('ai_lab_chatbot.views.stream_chat')
+    def test_stores_token_counts_on_assistant_message(self, mock_stream):
+        mock_stream.side_effect = self._stream_with_stats(
+            ['Hi'],
+            {'prompt_tokens': 1200, 'completion_tokens': 5,
+             'eval_duration_ms': 500.0, 'total_duration_ms': 800.0},
+        )
+        self.client.login(username='leo', password='secret')
+
+        resp = self._post(conversation_id=None, content='hi')
+        frames = self._frames(resp)
+
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        assistant = conv.messages.get(role='assistant')
+        self.assertEqual(assistant.prompt_tokens, 1200)
+        self.assertEqual(assistant.completion_tokens, 5)
+        # The user turn never carries counts.
+        self.assertIsNone(conv.messages.get(role='user').prompt_tokens)
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_emits_stats_frame_before_done(self, mock_stream):
+        mock_stream.side_effect = self._stream_with_stats(
+            ['Hi'],
+            {'prompt_tokens': 1200, 'completion_tokens': 5,
+             'eval_duration_ms': 500.0, 'total_duration_ms': 800.0},
+        )
+        self.client.login(username='leo', password='secret')
+
+        frames = self._frames(self._post(conversation_id=None, content='hi'))
+        types = [f['type'] for f in frames]
+
+        self.assertIn('stats', types)
+        self.assertLess(types.index('stats'), types.index('done'))
+        stats = frames[types.index('stats')]
+        self.assertEqual(stats['prompt_tokens'], 1200)
+        self.assertEqual(stats['completion_tokens'], 5)
+        self.assertEqual(stats['eval_duration_ms'], 500.0)
+        self.assertEqual(stats['total_duration_ms'], 800.0)
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_no_stats_frame_when_metrics_absent(self, mock_stream):
+        # Stream that never populates stats_out (metrics unavailable): no stats
+        # frame, and the assistant message keeps null counts.
+        mock_stream.return_value = iter(['Hi'])
+        self.client.login(username='leo', password='secret')
+
+        frames = self._frames(self._post(conversation_id=None, content='hi'))
+        self.assertNotIn('stats', [f['type'] for f in frames])
+
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        assistant = conv.messages.get(role='assistant')
+        self.assertIsNone(assistant.prompt_tokens)
+        self.assertIsNone(assistant.completion_tokens)
+
+    @patch('ai_lab_chatbot.views.stream_chat')
     def test_rejects_empty_content(self, mock_stream):
         self.client.login(username='leo', password='secret')
         resp = self._post(conversation_id=None, content='   ')
@@ -316,6 +425,41 @@ class ResumeAndHistoryViewTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, 'hello there')
         self.assertContains(resp, 'general kenobi')
+
+    def test_resume_bootstrap_carries_context_from_last_assistant(self):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        memory.add_message(conv, 'user', 'hi')
+        memory.add_message(conv, 'assistant', 'hello',
+                           prompt_tokens=1500, completion_tokens=42)
+        self.client.login(username='leo', password='secret')
+
+        resp = self.client.get(
+            reverse('ai_lab_chatbot:conversation', args=[conv.id]))
+        self.assertEqual(
+            resp.context['bootstrap']['context'],
+            {'prompt_tokens': 1500, 'completion_tokens': 42},
+        )
+        self.assertEqual(resp.context['mycroft_num_ctx'], settings.MYCROFT_NUM_CTX)
+
+    def test_resume_context_none_for_pre_feature_messages(self):
+        # An assistant message with null counts (predates the feature) resumes
+        # without error and reports no context.
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        memory.add_message(conv, 'user', 'hi')
+        memory.add_message(conv, 'assistant', 'hello')
+        self.client.login(username='leo', password='secret')
+
+        resp = self.client.get(
+            reverse('ai_lab_chatbot:conversation', args=[conv.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.context['bootstrap']['context'])
+        self.assertContains(resp, 'hello')  # transcript still renders
+
+    def test_fresh_chat_has_no_context(self):
+        self.client.login(username='leo', password='secret')
+        resp = self.client.get(reverse('ai_lab_chatbot:chat'))
+        self.assertIsNone(resp.context['bootstrap']['context'])
+        self.assertEqual(resp.context['mycroft_num_ctx'], settings.MYCROFT_NUM_CTX)
 
     def test_resume_other_users_conversation_is_404(self):
         conv = Conversation.objects.create(user_id=self.other.id, username='sam')

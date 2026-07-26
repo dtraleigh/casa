@@ -39,6 +39,8 @@
             <div class="form-text small mt-1">
                 Enter to send · Shift+Enter for a new line
             </div>
+            <div id="context-footer" class="form-text small text-muted mt-1"
+                 data-num-ctx="{{ mycroft_num_ctx }}"></div>
         </div>
     </div>
 </div>
@@ -251,6 +253,38 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
+    // Context usage footer. `num_ctx` is the token budget Ollama was configured
+    // with (server-provided data attribute), the denominator for the percentage.
+    const contextFooter = document.getElementById('context-footer');
+    const numCtx = parseInt(contextFooter.dataset.numCtx, 10) || 0;
+
+    function contextPrefix(promptTokens) {
+        const pct = numCtx ? Math.round((promptTokens / numCtx) * 100) : 0;
+        return 'Last request: ' + promptTokens.toLocaleString() + ' / ' +
+            numCtx.toLocaleString() + ' tokens (' + pct + '%)';
+    }
+
+    // Full live line, including this turn's response timing.
+    function updateContextFooter(stats) {
+        const seconds = (stats.total_duration_ms / 1000).toFixed(1);
+        const toksPerSec = stats.eval_duration_ms
+            ? Math.round(stats.completion_tokens / (stats.eval_duration_ms / 1000))
+            : 0;
+        contextFooter.textContent = contextPrefix(stats.prompt_tokens) +
+            ' · Response: ' + stats.completion_tokens + ' tok in ' +
+            seconds + 's (' + toksPerSec + ' tok/s)';
+    }
+
+    // Resume render: timings aren't stored, so show the tokens-only prefix.
+    // A null/absent context (pre-feature message) shows a dash. Only on resume —
+    // a fresh chat leaves the footer empty until its first reply.
+    function renderStoredContext(context) {
+        contextFooter.textContent = (context && context.prompt_tokens != null)
+            ? contextPrefix(context.prompt_tokens)
+            : 'Context: —';
+    }
+    if (boot.messages.length) renderStoredContext(boot.context);
+
     // Touch devices: focusing the textarea pops the on-screen keyboard, so
     // don't auto-focus after a reply — let the user tap to type. Desktop keeps
     // the convenience of a ready-to-type field.
@@ -389,6 +423,8 @@ document.addEventListener('DOMContentLoaded', function () {
                     if (frame.type === 'token') {
                         assistantText += frame.content;
                         renderMessage(assistantBubble, assistantText);
+                    } else if (frame.type === 'stats') {
+                        updateContextFooter(frame);
                     } else if (frame.type === 'error') {
                         notice = 'Mycroft hit an error and stopped.';
                     } else if (frame.type === 'done') {

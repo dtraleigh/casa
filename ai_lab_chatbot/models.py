@@ -132,6 +132,17 @@ class Message(models.Model):
     )
     role = models.CharField(max_length=20)
     content = models.TextField()
+    # Per-request context metrics from Ollama, set only on 'assistant' turns
+    # produced by a real completion. Null for user turns, partial/errored
+    # replies (no final chunk arrived), and every pre-feature row.
+    prompt_tokens = models.IntegerField(
+        null=True, blank=True,
+        help_text="Ollama prompt_eval_count for the request that produced this message.",
+    )
+    completion_tokens = models.IntegerField(
+        null=True, blank=True,
+        help_text="Ollama eval_count for this message.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

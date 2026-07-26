@@ -1,6 +1,7 @@
 import json
 import logging
 
+from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.http import (
     StreamingHttpResponse, HttpResponseBadRequest, JsonResponse, Http404,
@@ -29,11 +30,28 @@ def _serialize_messages(conversation):
     ]
 
 
+def _last_context(conversation):
+    """Token counts of the most recent assistant turn, for the context footer on
+    resume. None if there is none, or the last one predates the feature (its
+    counts are null) — the client renders `Context: —` in that case."""
+    last = conversation.messages.filter(role='assistant').last()
+    if not last or last.prompt_tokens is None:
+        return None
+    return {
+        'prompt_tokens': last.prompt_tokens,
+        'completion_tokens': last.completion_tokens,
+    }
+
+
 @login_required
 def chat_view(request):
     """A fresh chat page. The conversation is created lazily on first send."""
     return render(request, 'ai_lab_chatbot/chat.html', {
-        'bootstrap': {'conversation_id': None, 'title': '', 'messages': []},
+        'bootstrap': {
+            'conversation_id': None, 'title': '', 'messages': [],
+            'context': None,
+        },
+        'mycroft_num_ctx': settings.MYCROFT_NUM_CTX,
     })
 
 
@@ -52,7 +70,9 @@ def resume_view(request, conversation_id):
             'conversation_id': str(conversation.id),
             'title': conversation.display_title(),
             'messages': _serialize_messages(conversation),
+            'context': _last_context(conversation),
         },
+        'mycroft_num_ctx': settings.MYCROFT_NUM_CTX,
     })
 
 
@@ -130,8 +150,9 @@ def send_message(request):
         # error page, and gets appended to the chat as if the model said it.
         assistant_text = ''
         errored = False
+        stats = {}  # populated from Ollama's final chunk (token counts, timings)
         try:
-            for piece in stream_chat(messages):
+            for piece in stream_chat(messages, stats_out=stats):
                 assistant_text += piece
                 yield _frame('token', content=piece)
         except Exception as exc:
@@ -144,14 +165,24 @@ def send_message(request):
 
         # Persist whatever came back (partial included — transcript-visible) and
         # bump activity time. Runs before request_finished, so DB access is safe.
+        # Token counts land only on a clean completion; a partial/errored reply
+        # leaves them null (no final chunk means an empty `stats`).
         if assistant_text:
-            memory.add_message(conversation, 'assistant', assistant_text)
+            memory.add_message(
+                conversation, 'assistant', assistant_text,
+                prompt_tokens=stats.get('prompt_tokens'),
+                completion_tokens=stats.get('completion_tokens'),
+            )
         memory.touch(conversation)
 
         if not errored:
-            # Absent if the worker is killed mid-stream (gunicorn's abort raises
-            # SystemExit, bypassing the except above). The client treats a
-            # missing 'done' as a truncated response.
+            # The per-turn context metrics, ahead of the terminal frame. Only on
+            # a clean stream (an error path has no reliable counts/timings).
+            if stats:
+                yield _frame('stats', **stats)
+            # 'done' is absent if the worker is killed mid-stream (gunicorn's
+            # abort raises SystemExit, bypassing the except above). The client
+            # treats a missing 'done' as a truncated response.
             yield _frame('done', conversation_id=str(conversation.id), is_new=is_new)
 
     response = StreamingHttpResponse(

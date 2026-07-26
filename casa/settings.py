@@ -109,6 +109,11 @@ OLLAMA_CHAT_MODEL = env("OLLAMA_CHAT_MODEL", default="llama3.1:8b")
 # (the sliding window). The full transcript is always stored and displayed.
 MYCROFT_HISTORY_WINDOW = env.int("MYCROFT_HISTORY_WINDOW", default=20)
 
+# Ollama context window (tokens). Drives both the actual chat call (passed as
+# num_ctx in the request options) and the UI's "N / <budget>" percentage, so the
+# figure the user sees matches what Ollama actually allots.
+MYCROFT_NUM_CTX = env.int("MYCROFT_NUM_CTX", default=8192)
+
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = 'login'
