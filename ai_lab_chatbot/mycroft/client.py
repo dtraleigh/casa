@@ -43,6 +43,15 @@ def stream_chat(messages, stats_out=None):
             })
 
 
+def embed_text(text) -> list[float]:
+    """Embed one string with the configured embedding model, returning the raw
+    vector. Raises on failure — callers in `memory.py` make embedding
+    best-effort so a stumble never breaks the chat path.
+    """
+    resp = _client().embed(model=settings.OLLAMA_EMBED_MODEL, input=text)
+    return list(resp.embeddings[0])
+
+
 def complete_chat(messages) -> str:
     """Non-streaming chat completion, returned as a single string.
 

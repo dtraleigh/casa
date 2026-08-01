@@ -47,8 +47,8 @@ ai_lab_chatbot/
 │   ├── __init__.py
 │   ├── client.py      # Ollama wrapper for Mycroft
 │   ├── prompts.py     # assembles system prompt from active Personality + tools
-│   ├── tools.py       # tool definitions and dispatch (Phase 3+)
-│   └── memory.py      # history assembly, retrieval (Phase 4+)
+│   ├── tools.py       # tool definitions and dispatch (Phase 4+)
+│   └── memory.py      # history assembly, retrieval (Phase 3+)
 └── apps.py
 ```
 
@@ -77,7 +77,7 @@ Mounted at `/mycroft/` under casa's existing domain:
 - `/mycroft/` page with a simple chat interface: message list, input box, send button
 - POST endpoint that sends the current message + assembled system prompt to Ollama and returns the response
 - **Personality model** editable via Django admin, with exactly one active at a time
-- **HouseholdFact model** — shared knowledge, admin-curated (auto-learning deferred to Phase 4)
+- **HouseholdFact model** — shared knowledge, admin-curated (auto-learning deferred to Phase 3)
 - **UserContext model** — per-user context, auto-created empty on first use
 - Seed migration creating an initial "Mycroft v1" personality, starter HouseholdFacts, and a UserContext for `leo`
 - System prompt assembled at request time from active Personality + all HouseholdFacts + current user's UserContext
@@ -114,7 +114,7 @@ class Personality(models.Model):
         return cls.objects.filter(is_active=True).first()
 ```
 
-**HouseholdFact** — shared knowledge about the household. Every fact visible to every user's conversations. Phase 1 is admin-curated only; Phase 4 adds auto-learning from conversations.
+**HouseholdFact** — shared knowledge about the household. Every fact visible to every user's conversations. Phase 1 is admin-curated only; Phase 3 adds auto-learning from conversations.
 
 ```python
 class HouseholdFact(models.Model):
@@ -165,8 +165,8 @@ class UserContext(models.Model):
 
 **Design notes:**
 
-- **One HouseholdFact per row, not a text blob.** Individual facts are easier to add, edit, and delete. Also makes future auto-learning (Phase 4) much cleaner — each learned fact becomes its own row with source attribution.
-- **`source_user` on HouseholdFact** is unused in Phase 1 but present in the schema so no migration is needed when Phase 4 arrives.
+- **One HouseholdFact per row, not a text blob.** Individual facts are easier to add, edit, and delete. Also makes future auto-learning (Phase 3) much cleaner — each learned fact becomes its own row with source attribution.
+- **`source_user` on HouseholdFact** is unused in Phase 1 but present in the schema so no migration is needed when Phase 3 arrives.
 - **`UserContext.for_user()` classmethod** guarantees the prompt assembly code never has to null-check — every user has *a* context, even if empty.
 
 ### System prompt assembly
@@ -176,7 +176,7 @@ The final prompt sent to Ollama is not stored anywhere — it's assembled fresh 
 1. **Personality content** (from the active `Personality` row): description + instructions
 2. **Household knowledge** (all HouseholdFact rows — shared across users)
 3. **User context** (the UserContext for the requesting user)
-4. **Capability declarations** (auto-generated from registered tools — empty in Phase 1, populated in Phase 3+)
+4. **Capability declarations** (auto-generated from registered tools — empty in Phase 1, populated in Phase 4+)
 5. **Behavioral guardrails** (hardcoded rules that always apply regardless of personality — e.g. "never claim to have capabilities you don't have")
 
 Editing personality or context via admin can never accidentally break tool behavior, because tool descriptions come from code. Adding a new tool automatically updates what Mycroft claims he can do.
@@ -248,7 +248,7 @@ Other users get empty UserContexts on first login (via `UserContext.for_user()`)
 
 ### Model choice
 
-`llama3.1:8b` — already installed. Strong tool calling support for Phase 3.
+`llama3.1:8b` — already installed. Strong tool calling support for Phase 4.
 
 ### What is deliberately NOT in Phase 1
 
@@ -304,7 +304,7 @@ Recorded here so Phase 2+ builds on reality, not the original guess.
   So the model sketches above that show `ForeignKey(AUTH_USER_MODEL)` were **not**
   implemented as written:
   - `HouseholdFact.source_user` (FK) → `source_user_id` (`IntegerField`, null/blank)
-    + `source_username` (`CharField`). Unused in Phase 1; present for Phase 4.
+    + `source_username` (`CharField`). Unused in Phase 1; present for Phase 3.
   - `UserContext` keys on `user_id` (`IntegerField`, `unique=True`) + a convenience
     `username`, rather than a user FK. `for_user()` does get-or-create by `user_id`.
   Every model still has its own normal auto-increment `id` PK; `user_id` is just a
@@ -369,9 +369,9 @@ class Message(models.Model):
         ordering = ['created_at']
 ```
 
-Deliberately no embedding column yet — that comes in Phase 4 when it's needed.
+Deliberately no embedding column yet — that comes in Phase 3 when it's needed.
 
-**Sliding window:** send only the last N messages (say 20) to Ollama, plus the system prompt. Simple, effective. Context management comes in Phase 4.
+**Sliding window:** send only the last N messages (say 20) to Ollama, plus the system prompt. Simple, effective. Context management comes in Phase 3.
 
 **Definition of done:**
 
@@ -398,13 +398,13 @@ Phase 3+ builds on reality.
   non-owner; the UUID PK only makes URLs unguessable, it is **not** the access control.
 
 - **`Message` role/ordering tweaks.** Only `user`/`assistant` are persisted (the assembled
-  system prompt is never stored); `role` stays a plain CharField so Phase 3 `tool` needs no
+  system prompt is never stored); `role` stays a plain CharField so Phase 4 `tool` needs no
   migration. `Meta.ordering` is `['created_at', 'id']` — the `id` tie-break keeps
   same-microsecond inserts deterministically ordered.
 
-- **`mycroft/memory.py` was introduced now, not in Phase 4.** The plan slots it for Phase 4,
+- **`mycroft/memory.py` was introduced now, not in Phase 3.** The plan slots it for Phase 3,
   but Phase 2's persistence + sliding-window assembly naturally live there, keeping the view
-  thin. It's the seam Phase 3 (tool messages) and Phase 4 (embeddings, auto-learning "after
+  thin. It's the seam Phase 4 (tool messages) and Phase 3 (embeddings, auto-learning "after
   each exchange") attach to.
 
 - **Titles are generated by a separate non-streaming endpoint.** There's no background-task
@@ -442,39 +442,7 @@ Phase 3+ builds on reality.
 
 ---
 
-## Phase 3: Tool calling — weather integration
-
-**Goal:** Mycroft can answer questions about current weather for Raleigh (and other locations if asked). This is the first "capability" — the pattern all future capabilities will follow.
-
-**What ships:**
-
-- Tool definition schema for `get_current_weather(location)`
-- Tool dispatch layer in `mycroft/tools.py`
-- Weather API integration (Open-Meteo — free, no key required, respects the "as offline as possible" principle since the tool call is minimal and only fires when needed)
-- Multi-turn tool workflow: model requests tool → Django calls API → result goes back to model → model synthesizes natural response
-- Tool call and result stored as messages in the conversation (with `role='tool'`) — full audit trail
-
-**Architecture note:** Ollama's `/api/chat` endpoint has native tool-calling support with Llama 3.1. The model returns a `tool_calls` array when it wants to invoke a function; Django's job is to see that, call the actual function, and send the result back with `role='tool'` in the next turn. Loop until the model returns a plain response.
-
-**System prompt updates:** Add "You can check current weather using the get_current_weather tool. Use it when Leo asks about weather; don't guess." Update the "capabilities are limited" language to reflect what's now possible.
-
-**Tools designed for later expansion:** the tool dispatch pattern is generic. Adding future tools (calendar lookup, blog search, home network status) is "define the tool schema, write the function, register it" — not a rewrite.
-
-**Definition of done:**
-
-- Ask "what's the weather in Raleigh?" → Mycroft returns actual current conditions
-- Ask "should I bring a jacket to dinner tonight?" → Mycroft calls weather tool and reasons about it
-- Ask "what's 2+2?" → Mycroft answers directly without calling a tool
-- Conversation transcript shows the tool call and result as visible messages
-
-**Open questions for Phase 3:**
-
-- Weather provider — Open-Meteo (free, no key, good enough) vs. something you already use? I'm defaulting to Open-Meteo.
-- Location default: assume Raleigh when not specified? Recommendation: yes, since that's where you are 95% of the time.
-
----
-
-## Phase 4: Semantic memory + knowledge base
+## Phase 3: Semantic memory + knowledge base
 
 **Goal:** Mycroft can recall things you told him weeks ago, and can be pre-loaded with facts about you and your world.
 
@@ -490,7 +458,7 @@ Phase 3+ builds on reality.
 
 ### Auto-learning design notes
 
-This is the hard part of Phase 4 and deserves its own scoping when we get there. Key concerns:
+This is the hard part of Phase 3 and deserves its own scoping when we get there. Key concerns:
 
 - **Extraction prompt quality.** How reliably can Mycroft identify "durable household facts" vs. transient information?
 - **Deduplication.** If the same fact gets learned twice with slightly different wording, we need to consolidate.
@@ -545,10 +513,44 @@ class Knowledge(models.Model):
 - Have a long conversation about a topic. Come back weeks later, mention the topic obliquely, and Mycroft brings up relevant details from the earlier exchange.
 - Add a knowledge entry via admin ("Leo drives a 2020 Subaru Outback"). Ask "what car should I look at?" and see if it references the Outback context appropriately.
 
-**Open questions for Phase 4:**
+**Open questions for Phase 3:**
 
 - Do we want to embed *every* message, or only user messages? (Every message is more complete; user messages only saves ~half the embedding calls and is often enough.) Recommendation: embed everything for full coverage.
 - How aggressive should recall be? Too much retrieved context and Mycroft over-references old stuff; too little and he feels forgetful. Tunable.
+
+---
+
+## Phase 4: Tool calling — weather integration
+
+**Goal:** Mycroft can answer questions about current weather for Raleigh (and other locations if asked). This is the first "capability" — the pattern all future capabilities will follow.
+
+**What ships:**
+
+- Tool definition schema for `get_current_weather(location)`
+- Tool dispatch layer in `mycroft/tools.py`
+- Weather API integration (Open-Meteo — free, no key required, respects the "as offline as possible" principle since the tool call is minimal and only fires when needed)
+- Multi-turn tool workflow: model requests tool → Django calls API → result goes back to model → model synthesizes natural response
+- Tool call and result stored as messages in the conversation (with `role='tool'`) — full audit trail
+
+**Architecture note:** Ollama's `/api/chat` endpoint has native tool-calling support with Llama 3.1. The model returns a `tool_calls` array when it wants to invoke a function; Django's job is to see that, call the actual function, and send the result back with `role='tool'` in the next turn. Loop until the model returns a plain response.
+
+**System prompt updates:** Add "You can check current weather using the get_current_weather tool. Use it when Leo asks about weather; don't guess." Update the "capabilities are limited" language to reflect what's now possible.
+
+**Tools designed for later expansion:** the tool dispatch pattern is generic. Adding future tools (calendar lookup, blog search, home network status) is "define the tool schema, write the function, register it" — not a rewrite.
+
+**Embeddings note (since Phase 3 shipped first):** the `role='tool'` call/result messages introduced here flow through the embed-at-write-time path added in Phase 3. Decide at implementation whether to embed tool turns (useful for recalling "what was the weather last week") or skip them — a one-line branch in `add_message`, not a blocker.
+
+**Definition of done:**
+
+- Ask "what's the weather in Raleigh?" → Mycroft returns actual current conditions
+- Ask "should I bring a jacket to dinner tonight?" → Mycroft calls weather tool and reasons about it
+- Ask "what's 2+2?" → Mycroft answers directly without calling a tool
+- Conversation transcript shows the tool call and result as visible messages
+
+**Open questions for Phase 4:**
+
+- Weather provider — Open-Meteo (free, no key, good enough) vs. something you already use? I'm defaulting to Open-Meteo.
+- Location default: assume Raleigh when not specified? Recommendation: yes, since that's where you are 95% of the time.
 
 ---
 
@@ -592,12 +594,12 @@ Ideas to hold for later:
 | Conversation | `llama3.1:8b` | Already installed. Strong tool calling. Reevaluate if quality issues emerge. |
 | Embeddings | `nomic-embed-text` | Already installed. 768 dims, cosine or L2. |
 
-Both stay resident with `OLLAMA_KEEP_ALIVE=24h` once Phase 4 ships (so retrieval doesn't pay the load cost per query). Decision deferred until Phase 4.
+Both stay resident with `OLLAMA_KEEP_ALIVE=24h` once Phase 3 ships (so retrieval doesn't pay the load cost per query). Decision deferred until Phase 3.
 
 ## Open architectural questions (later phases)
 
-- **Static vs. dynamic tool registration** — hard-coded in Phase 3, tool registry pattern later if needed.
-- **Auto-learning extraction quality** — Phase 4 concern; will need its own scoping session.
+- **Static vs. dynamic tool registration** — hard-coded in Phase 4, tool registry pattern later if needed.
+- **Auto-learning extraction quality** — Phase 3 concern; will need its own scoping session.
 - **Voice hardware direction** — Phase 5; depends on what we learn in Phases 1-4.
 
 ## Next actions

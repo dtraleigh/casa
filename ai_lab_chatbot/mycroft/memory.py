@@ -5,9 +5,15 @@ their owner), writing messages, and assembling the sliding-window history sent
 to Ollama. Phase 3 (tool messages) and Phase 4 (embeddings, auto-learning) hook
 in here rather than in the HTTP layer.
 """
-from django.conf import settings
+import logging
 
-from ai_lab_chatbot.models import Conversation, Message
+from django.conf import settings
+from pgvector.django import CosineDistance
+
+from ai_lab_chatbot.models import Conversation, Knowledge, Message
+from ai_lab_chatbot.mycroft.client import embed_text
+
+logger = logging.getLogger(__name__)
 
 
 def _window_size():
@@ -102,3 +108,71 @@ def delete_conversation(user, conversation_id):
     Conversation.DoesNotExist if it isn't theirs."""
     conversation = Conversation.objects.get(id=conversation_id, user_id=user.id)
     conversation.delete()
+
+
+# --- Semantic memory (Phase 3) ---------------------------------------------
+
+def embed_message(message):
+    """Embed a message and store the vector, best-effort. Returns the vector, or
+    None if embedding failed — a stumble here (Ollama down, model missing) must
+    never break the chat path, so the message just stays unretrievable."""
+    try:
+        vector = embed_text(message.content)
+    except Exception:
+        logger.exception("Mycroft message embedding failed")
+        return None
+    message.embedding = vector
+    message.save(update_fields=['embedding'])
+    return vector
+
+
+def embed_knowledge(knowledge):
+    """Embed a Knowledge row from its topic + content and store the vector,
+    best-effort (see embed_message). Returns the vector or None."""
+    try:
+        vector = embed_text(f"{knowledge.topic}\n{knowledge.content}")
+    except Exception:
+        logger.exception("Mycroft knowledge embedding failed")
+        return None
+    knowledge.embedding = vector
+    knowledge.save(update_fields=['embedding'])
+    return vector
+
+
+def retrieve_memories(user, query_vec, *, exclude_conversation_id=None):
+    """Semantically relevant context for `query_vec`, as (knowledge, messages).
+
+    Knowledge is global (curated, shared). Past messages are scoped to the
+    requesting user and exclude the current conversation — its recent turns are
+    already in the sliding window, so recall is about *other* conversations. Both
+    drop matches beyond MYCROFT_RETRIEVAL_MAX_DISTANCE and rows without an
+    embedding. Returns empty lists when there's no query vector to match on.
+    """
+    if query_vec is None:
+        return [], []
+
+    max_distance = settings.MYCROFT_RETRIEVAL_MAX_DISTANCE
+
+    knowledge = list(
+        Knowledge.objects
+        .exclude(embedding__isnull=True)
+        .annotate(distance=CosineDistance('embedding', query_vec))
+        .filter(distance__lte=max_distance)
+        .order_by('distance')[:settings.MYCROFT_RETRIEVAL_KNOWLEDGE]
+    )
+
+    messages_qs = (
+        Message.objects
+        .filter(conversation__user_id=user.id)
+        .exclude(embedding__isnull=True)
+    )
+    if exclude_conversation_id is not None:
+        messages_qs = messages_qs.exclude(conversation_id=exclude_conversation_id)
+    messages = list(
+        messages_qs
+        .annotate(distance=CosineDistance('embedding', query_vec))
+        .filter(distance__lte=max_distance)
+        .order_by('distance')[:settings.MYCROFT_RETRIEVAL_MESSAGES]
+    )
+
+    return knowledge, messages

@@ -25,8 +25,13 @@ _FALLBACK_IDENTITY = (
 )
 
 
-def build_system_prompt(user) -> str:
-    """Assemble the system prompt for `user`. Empty sections are omitted."""
+def build_system_prompt(user, knowledge=None, past=None) -> str:
+    """Assemble the system prompt for `user`. Empty sections are omitted.
+
+    `knowledge` and `past` are optional semantically-retrieved context (Phase 3):
+    Knowledge rows and past Message rows respectively. They ride in the system
+    prompt like personality/facts — assembled fresh, never stored.
+    """
     personality = Personality.get_active()
     facts = HouseholdFact.objects.all()  # small table, load all
     context = UserContext.for_user(user)
@@ -47,6 +52,20 @@ def build_system_prompt(user) -> str:
 
     if context.content.strip():
         sections.append("About the current user:\n" + context.content.strip())
+
+    knowledge_lines = [
+        f"- {k.content.strip()}" for k in (knowledge or []) if k.content.strip()
+    ]
+    if knowledge_lines:
+        sections.append("Relevant knowledge:\n" + "\n".join(knowledge_lines))
+
+    past_lines = [
+        f"- {m.role}: {m.content.strip()}" for m in (past or []) if m.content.strip()
+    ]
+    if past_lines:
+        sections.append(
+            "Relevant past conversation:\n" + "\n".join(past_lines)
+        )
 
     if tool_descriptions.strip():
         sections.append(tool_descriptions.strip())

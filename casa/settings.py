@@ -114,6 +114,19 @@ MYCROFT_HISTORY_WINDOW = env.int("MYCROFT_HISTORY_WINDOW", default=20)
 # figure the user sees matches what Ollama actually allots.
 MYCROFT_NUM_CTX = env.int("MYCROFT_NUM_CTX", default=8192)
 
+# Embedding model for semantic memory (Phase 3). Messages and Knowledge entries
+# are embedded with this and stored as pgvector columns for similarity search.
+OLLAMA_EMBED_MODEL = env("OLLAMA_EMBED_MODEL", default="nomic-embed-text")
+
+# Semantic-recall knobs (tunable via .env without a code change). Each new user
+# turn pulls up to this many similar past messages (the user's own, from other
+# conversations) and curated Knowledge entries into the system prompt.
+MYCROFT_RETRIEVAL_MESSAGES = env.int("MYCROFT_RETRIEVAL_MESSAGES", default=5)
+MYCROFT_RETRIEVAL_KNOWLEDGE = env.int("MYCROFT_RETRIEVAL_KNOWLEDGE", default=3)
+# Cosine-distance ceiling; matches farther than this are treated as irrelevant
+# and dropped, so weak matches don't pollute the prompt.
+MYCROFT_RETRIEVAL_MAX_DISTANCE = env.float("MYCROFT_RETRIEVAL_MAX_DISTANCE", default=0.55)
+
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = 'login'

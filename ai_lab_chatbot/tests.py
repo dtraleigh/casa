@@ -8,7 +8,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from ai_lab_chatbot.models import (
-    Personality, HouseholdFact, UserContext, Conversation, Message,
+    Personality, HouseholdFact, UserContext, Conversation, Message, Knowledge,
 )
 from ai_lab_chatbot.mycroft import memory
 from ai_lab_chatbot.mycroft.client import stream_chat
@@ -17,6 +17,18 @@ from ai_lab_chatbot.mycroft.prompts import build_system_prompt, STANDARD_GUARDRA
 
 # Models live in the `ai_lab` DB and auth.User in `default`; both are needed.
 DBS = {'default', 'ai_lab'}
+
+EMBED_DIM = 768
+
+
+def _vec(pairs=()):
+    """A 768-dim test embedding with the given (index, value) components set,
+    the rest zero — lets tests place vectors at known cosine distances without
+    calling Ollama."""
+    v = [0.0] * EMBED_DIM
+    for index, value in pairs:
+        v[index] = value
+    return v
 
 
 class PersonalityModelTests(TestCase):
@@ -230,6 +242,172 @@ class MemoryTests(TestCase):
         self.assertTrue(Conversation.objects.filter(id=conv.id).exists())
 
 
+class EmbeddingHelperTests(TestCase):
+    """embed_message / embed_knowledge store the vector, and are best-effort —
+    an embed failure is swallowed so the chat path never breaks."""
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='x')
+        self.conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+
+    @patch('ai_lab_chatbot.mycroft.memory.embed_text')
+    def test_embed_message_stores_vector(self, mock_embed):
+        mock_embed.return_value = _vec([(0, 1.0)])
+        msg = memory.add_message(self.conv, 'user', 'remember trains')
+
+        returned = memory.embed_message(msg)
+
+        self.assertIsNotNone(returned)
+        msg.refresh_from_db()
+        self.assertIsNotNone(msg.embedding)
+        self.assertEqual(len(list(msg.embedding)), EMBED_DIM)
+        mock_embed.assert_called_once_with('remember trains')
+
+    @patch('ai_lab_chatbot.mycroft.memory.embed_text',
+           side_effect=RuntimeError('ollama down'))
+    def test_embed_message_swallows_failure(self, mock_embed):
+        msg = memory.add_message(self.conv, 'user', 'remember trains')
+
+        # assertLogs both asserts the error is logged and keeps the expected
+        # traceback out of the test console.
+        with self.assertLogs('ai_lab_chatbot.mycroft.memory', level='ERROR'):
+            returned = memory.embed_message(msg)
+
+        self.assertIsNone(returned)
+        msg.refresh_from_db()
+        self.assertIsNone(msg.embedding)  # still saved, just unretrievable
+
+    @patch('ai_lab_chatbot.mycroft.memory.embed_text')
+    def test_embed_knowledge_stores_vector_from_topic_and_content(self, mock_embed):
+        mock_embed.return_value = _vec([(3, 1.0)])
+        k = Knowledge.objects.create(topic='Car', content='Leo drives an Outback')
+
+        memory.embed_knowledge(k)
+
+        k.refresh_from_db()
+        self.assertIsNotNone(k.embedding)
+        mock_embed.assert_called_once_with('Car\nLeo drives an Outback')
+
+
+class RetrieveMemoriesTests(TestCase):
+    """Semantic retrieval: cosine ordering, the distance ceiling, and the
+    privacy/de-dup scoping rules. Requires the `vector` extension in the test DB."""
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='x')
+        self.other = User.objects.create_user(username='sam', password='x')
+        self.conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        self.old_conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        # Query points along axis 0. Distances (cosine): near ~0.02, mid ~0.29,
+        # far = 1.0 (orthogonal, beyond the 0.55 default ceiling).
+        self.query = _vec([(0, 1.0)])
+        self.near = _vec([(0, 1.0), (1, 0.2)])
+        self.mid = _vec([(0, 1.0), (1, 1.0)])
+        self.far = _vec([(1, 1.0)])
+
+    def _msg(self, conv, content, embedding, role='user'):
+        return Message.objects.create(
+            conversation=conv, role=role, content=content, embedding=embedding)
+
+    def test_orders_by_distance_and_drops_beyond_ceiling(self):
+        self._msg(self.old_conv, 'mid', self.mid)
+        self._msg(self.old_conv, 'near', self.near)
+        self._msg(self.old_conv, 'far', self.far)
+
+        _, messages = memory.retrieve_memories(
+            self.user, self.query, exclude_conversation_id=self.conv.id)
+
+        # Closest first; the orthogonal 'far' match is filtered out.
+        self.assertEqual([m.content for m in messages], ['near', 'mid'])
+
+    def test_excludes_current_conversation(self):
+        self._msg(self.conv, 'in current window', self.near)
+        self._msg(self.old_conv, 'older recall', self.near)
+
+        _, messages = memory.retrieve_memories(
+            self.user, self.query, exclude_conversation_id=self.conv.id)
+
+        self.assertEqual([m.content for m in messages], ['older recall'])
+
+    def test_scoped_to_user(self):
+        theirs = Conversation.objects.create(user_id=self.other.id, username='sam')
+        self._msg(theirs, "sam's secret", self.near)
+        self._msg(self.old_conv, 'my memory', self.near)
+
+        _, messages = memory.retrieve_memories(
+            self.user, self.query, exclude_conversation_id=self.conv.id)
+
+        self.assertEqual([m.content for m in messages], ['my memory'])
+
+    def test_ignores_rows_without_embedding(self):
+        self._msg(self.old_conv, 'no vector', None)
+
+        _, messages = memory.retrieve_memories(
+            self.user, self.query, exclude_conversation_id=self.conv.id)
+
+        self.assertEqual(messages, [])
+
+    def test_knowledge_is_global_and_thresholded(self):
+        Knowledge.objects.create(topic='near', content='relevant', embedding=self.near)
+        Knowledge.objects.create(topic='far', content='irrelevant', embedding=self.far)
+
+        knowledge, _ = memory.retrieve_memories(
+            self.user, self.query, exclude_conversation_id=self.conv.id)
+
+        self.assertEqual([k.content for k in knowledge], ['relevant'])
+
+    @override_settings(MYCROFT_RETRIEVAL_MESSAGES=1)
+    def test_message_limit_honored(self):
+        self._msg(self.old_conv, 'near', self.near)
+        self._msg(self.old_conv, 'mid', self.mid)
+
+        _, messages = memory.retrieve_memories(
+            self.user, self.query, exclude_conversation_id=self.conv.id)
+
+        self.assertEqual([m.content for m in messages], ['near'])
+
+    def test_none_query_returns_empty(self):
+        self._msg(self.old_conv, 'near', self.near)
+        self.assertEqual(
+            memory.retrieve_memories(self.user, None, exclude_conversation_id=self.conv.id),
+            ([], []),
+        )
+
+
+class RetrievedPromptTests(TestCase):
+    """build_system_prompt renders the retrieved knowledge / past sections when
+    given them, and omits them otherwise."""
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='x')
+        Personality.objects.create(
+            name='Mycroft', description='You are Mycroft.', instructions='',
+            is_active=True)
+
+    def test_injects_knowledge_and_past(self):
+        knowledge = [SimpleNamespace(content='Leo drives an Outback')]
+        past = [SimpleNamespace(role='user', content='I love trains')]
+
+        prompt = build_system_prompt(self.user, knowledge=knowledge, past=past)
+
+        self.assertIn('Relevant knowledge:', prompt)
+        self.assertIn('- Leo drives an Outback', prompt)
+        self.assertIn('Relevant past conversation:', prompt)
+        self.assertIn('- user: I love trains', prompt)
+
+    def test_omits_sections_when_empty(self):
+        prompt = build_system_prompt(self.user, knowledge=[], past=[])
+        self.assertNotIn('Relevant knowledge:', prompt)
+        self.assertNotIn('Relevant past conversation:', prompt)
+
+    def test_default_args_unchanged(self):
+        # No retrieval args → behaves exactly as before.
+        self.assertNotIn('Relevant knowledge:', build_system_prompt(self.user))
+
+
 class StreamChatStatsTests(TestCase):
     """The client wrapper: num_ctx is sent, and the final chunk's metrics land
     in stats_out with durations converted from nanoseconds to milliseconds."""
@@ -436,6 +614,56 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         mock_stream.assert_not_called()
         self.assertEqual(Conversation.objects.count(), 0)
+
+    @patch('ai_lab_chatbot.mycroft.memory.embed_text')
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_retrieved_knowledge_feeds_system_prompt(self, mock_stream, mock_embed):
+        # The incoming turn embeds to a vector that matches a seeded Knowledge row.
+        mock_embed.return_value = _vec([(0, 1.0)])
+        mock_stream.return_value = iter(['ok'])
+        Knowledge.objects.create(
+            topic='Car', content='Leo drives a 2020 Subaru Outback',
+            embedding=_vec([(0, 1.0)]))
+        self.client.login(username='leo', password='secret')
+
+        self._frames(self._post(conversation_id=None, content='what car?'))
+
+        system_prompt = mock_stream.call_args.args[0][0]['content']
+        self.assertIn('Relevant knowledge:', system_prompt)
+        self.assertIn('Leo drives a 2020 Subaru Outback', system_prompt)
+
+    @patch('ai_lab_chatbot.mycroft.memory.embed_text')
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_embeds_both_turns(self, mock_stream, mock_embed):
+        mock_embed.return_value = _vec([(0, 1.0)])
+        mock_stream.return_value = iter(['reply'])
+        self.client.login(username='leo', password='secret')
+
+        frames = self._frames(self._post(conversation_id=None, content='hi'))
+
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        self.assertIsNotNone(conv.messages.get(role='user').embedding)
+        self.assertIsNotNone(conv.messages.get(role='assistant').embedding)
+
+    @patch('ai_lab_chatbot.mycroft.memory.embed_text',
+           side_effect=RuntimeError('embed model down'))
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_chat_survives_embed_failure(self, mock_stream, mock_embed):
+        mock_stream.return_value = iter(['still works'])
+        self.client.login(username='leo', password='secret')
+
+        # Both turns fail to embed; assertLogs captures those expected errors so
+        # the traceback stays out of the console.
+        with self.assertLogs('ai_lab_chatbot.mycroft.memory', level='ERROR'):
+            frames = self._frames(self._post(conversation_id=None, content='hi'))
+
+        # Reply streamed and completed despite embedding failing on both turns.
+        self.assertEqual(frames[-1]['type'], 'done')
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        self.assertEqual(
+            list(conv.messages.values_list('role', 'content')),
+            [('user', 'hi'), ('assistant', 'still works')])
+        self.assertIsNone(conv.messages.get(role='assistant').embedding)
 
 
 class ResumeAndHistoryViewTests(TestCase):

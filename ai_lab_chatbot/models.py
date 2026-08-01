@@ -1,6 +1,7 @@
 import uuid
 
 from django.db import models
+from pgvector.django import VectorField
 
 
 class Personality(models.Model):
@@ -143,6 +144,10 @@ class Message(models.Model):
         null=True, blank=True,
         help_text="Ollama eval_count for this message.",
     )
+    # nomic-embed-text vector for semantic recall (Phase 3), set best-effort just
+    # after the row is written. Null for pre-feature rows and any turn whose embed
+    # call failed — such rows simply aren't retrievable.
+    embedding = VectorField(dimensions=768, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -151,3 +156,22 @@ class Message(models.Model):
 
     def __str__(self):
         return f"{self.role}: {self.content[:60]}"
+
+
+class Knowledge(models.Model):
+    """Curated facts Mycroft can recall, independent of any conversation. Global
+    (shared across users), admin-authored, and embedded on save so semantic
+    retrieval can surface the relevant ones per turn (Phase 3)."""
+    topic = models.CharField(max_length=200)
+    content = models.TextField(help_text="A fact or note Mycroft should be able to recall.")
+    # Embedded from topic + content on save. Null only if the embed call failed
+    # (the row still exists; it just won't be retrieved until re-saved).
+    embedding = VectorField(dimensions=768, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "knowledge"
+
+    def __str__(self):
+        return self.topic

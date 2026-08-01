@@ -161,8 +161,16 @@ def send_message(request):
 
     is_new = conversation.messages.count() == 0
 
-    memory.add_message(conversation, 'user', content)
-    system_prompt = build_system_prompt(request.user)
+    user_msg = memory.add_message(conversation, 'user', content)
+    # Embed the incoming turn (best-effort) and reuse that vector to pull in
+    # semantically relevant knowledge + past messages from other conversations.
+    query_vec = memory.embed_message(user_msg)
+    knowledge, past = memory.retrieve_memories(
+        request.user, query_vec, exclude_conversation_id=conversation.id
+    )
+    system_prompt = build_system_prompt(
+        request.user, knowledge=knowledge, past=past
+    )
     messages = (
         [{'role': 'system', 'content': system_prompt}]
         + memory.history_for_prompt(conversation)
@@ -193,11 +201,14 @@ def send_message(request):
         # Token counts land only on a clean completion; a partial/errored reply
         # leaves them null (no final chunk means an empty `stats`).
         if assistant_text:
-            memory.add_message(
+            assistant_msg = memory.add_message(
                 conversation, 'assistant', assistant_text,
                 prompt_tokens=stats.get('prompt_tokens'),
                 completion_tokens=stats.get('completion_tokens'),
             )
+            # Embed the reply too (best-effort) so Mycroft's own answers are
+            # recallable later, not just the user's turns.
+            memory.embed_message(assistant_msg)
         memory.touch(conversation)
 
         if not errored:
