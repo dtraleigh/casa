@@ -7,7 +7,23 @@
 <div id="chat-wrap" class="container-fluid px-3 px-lg-4 py-3 d-flex flex-column">
     <div class="card shadow-sm flex-grow-1 d-flex flex-column overflow-hidden">
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
-            <span class="fw-bold text-truncate" id="conv-title" style="max-width: 40%;">Mycroft</span>
+            <div class="d-flex align-items-center gap-2 text-truncate" style="max-width: 50%;">
+                <span class="fw-bold text-truncate" id="conv-title">Mycroft</span>
+                {# Revealed once the conversation is persisted (an id exists). #}
+                <button type="button" id="conv-edit"
+                        class="btn btn-link btn-sm p-0 lh-1 text-white-50 d-none"
+                        aria-label="Rename conversation" title="Rename">
+                    <i class="bi bi-pencil"></i>
+                </button>
+                <div id="conv-rename" class="input-group input-group-sm d-none">
+                    <input type="text" id="conv-rename-input" class="form-control"
+                           maxlength="200" placeholder="Conversation name"
+                           aria-label="Conversation name">
+                    <button type="button" id="conv-rename-save" class="btn btn-light">Save</button>
+                    <button type="button" id="conv-rename-cancel"
+                            class="btn btn-outline-light">Cancel</button>
+                </div>
+            </div>
             <div class="d-flex align-items-center gap-2">
                 <a href="{% url 'ai_lab_chatbot:chat' %}" class="btn btn-sm btn-outline-light">New</a>
                 <a href="{% url 'ai_lab_chatbot:history' %}" class="btn btn-sm btn-outline-light">History</a>
@@ -53,13 +69,73 @@ document.addEventListener('DOMContentLoaded', function () {
     const sendBtn = document.getElementById('send-btn');
     const messagesEl = document.getElementById('messages');
     const titleEl = document.getElementById('conv-title');
+    const editBtn = document.getElementById('conv-edit');
+    const renameBox = document.getElementById('conv-rename');
+    const renameInput = document.getElementById('conv-rename-input');
 
     // Server owns history now. We track only the current conversation id (null
     // until the first send persists one) and whether the placeholder is showing.
     const boot = JSON.parse(document.getElementById('mycroft-bootstrap').textContent);
     let conversationId = boot.conversation_id;   // null on a fresh page
     let firstMessage = true;
+    // The raw stored title ('' while still auto-named). The header may show a
+    // snippet fallback, but the edit field always starts from the real value.
+    let currentTitle = boot.title || '';
     if (boot.title) titleEl.textContent = boot.title;
+
+    // The rename control only makes sense once the conversation is persisted.
+    function showEditIfPersisted() {
+        editBtn.classList.toggle('d-none', !conversationId);
+    }
+    showEditIfPersisted();
+
+    function enterTitleEdit() {
+        renameInput.value = currentTitle;
+        titleEl.classList.add('d-none');
+        editBtn.classList.add('d-none');
+        renameBox.classList.remove('d-none');
+        renameInput.focus();
+        renameInput.select();
+    }
+
+    function exitTitleEdit() {
+        renameBox.classList.add('d-none');
+        titleEl.classList.remove('d-none');
+        showEditIfPersisted();
+    }
+
+    function saveTitleEdit() {
+        if (!conversationId) return;
+        const saveBtn = document.getElementById('conv-rename-save');
+        saveBtn.disabled = true;
+        fetch('/mycroft/conversation/' + conversationId + '/rename/', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': csrftoken,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ title: renameInput.value }),
+        }).then(function (r) {
+            if (!r.ok) throw new Error('Request failed');
+            return r.json();
+        }).then(function (data) {
+            currentTitle = data.title;
+            titleEl.textContent = data.display_title;
+            exitTitleEdit();
+        }).catch(function () {
+            /* keep the editor open so the edit isn't lost */
+        }).finally(function () {
+            saveBtn.disabled = false;
+        });
+    }
+
+    editBtn.addEventListener('click', enterTitleEdit);
+    document.getElementById('conv-rename-save').addEventListener('click', saveTitleEdit);
+    document.getElementById('conv-rename-cancel').addEventListener('click', exitTitleEdit);
+    renameInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); saveTitleEdit(); }
+        else if (e.key === 'Escape') { exitTitleEdit(); }
+    });
 
     // Fill the viewport below the navbar. Measure the navbar rather than
     // hardcoding its height — it changes with breakpoint and font metrics.
@@ -338,7 +414,10 @@ document.addEventListener('DOMContentLoaded', function () {
             );
             if (!resp.ok) return;
             const data = await resp.json();
-            if (data.title) titleEl.textContent = data.title;
+            if (data.title) {
+                titleEl.textContent = data.title;
+                currentTitle = data.title;
+            }
         } catch (e) { /* leave the default title */ }
     }
 
@@ -454,6 +533,8 @@ document.addEventListener('DOMContentLoaded', function () {
             history.replaceState(
                 null, '', '/mycroft/conversation/' + conversationId + '/'
             );
+            // The conversation now exists — the rename control applies.
+            showEditIfPersisted();
         }
         if (respIsNew && conversationId && assistantText) {
             generateTitle();

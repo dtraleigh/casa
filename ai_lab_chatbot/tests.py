@@ -192,6 +192,37 @@ class MemoryTests(TestCase):
         with self.assertRaises(Conversation.DoesNotExist):
             memory.toggle_favorite(self.user, conv.id)
 
+    def test_rename_sets_title_and_preserves_updated_at(self):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        before = conv.updated_at
+
+        renamed = memory.rename_conversation(self.user, conv.id, '  Groceries  ')
+        # Trimmed, and renaming is not activity — updated_at must not move.
+        self.assertEqual(renamed.title, 'Groceries')
+        renamed.refresh_from_db()
+        self.assertEqual(renamed.title, 'Groceries')
+        self.assertEqual(renamed.updated_at, before)
+
+    def test_rename_blank_keeps_existing_title(self):
+        conv = Conversation.objects.create(
+            user_id=self.user.id, username='leo', title='Old name')
+
+        # A blank save is a no-op — the existing name must survive.
+        renamed = memory.rename_conversation(self.user, conv.id, '   ')
+        self.assertEqual(renamed.title, 'Old name')
+        renamed.refresh_from_db()
+        self.assertEqual(renamed.title, 'Old name')
+
+    def test_rename_truncates_to_200(self):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        renamed = memory.rename_conversation(self.user, conv.id, 'x' * 250)
+        self.assertEqual(len(renamed.title), 200)
+
+    def test_rename_rejects_other_users_conversation(self):
+        conv = Conversation.objects.create(user_id=self.other.id, username='sam')
+        with self.assertRaises(Conversation.DoesNotExist):
+            memory.rename_conversation(self.user, conv.id, 'mine now')
+
     def test_delete_conversation_scoped(self):
         conv = Conversation.objects.create(user_id=self.other.id, username='sam')
         with self.assertRaises(Conversation.DoesNotExist):
@@ -528,6 +559,64 @@ class FavoriteViewTests(TestCase):
         self.assertEqual(resp.status_code, 404)
         conv.refresh_from_db()
         self.assertFalse(conv.is_favorite)
+
+
+class RenameViewTests(TestCase):
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='secret')
+        self.other = User.objects.create_user(username='sam', password='x')
+
+    def _post(self, conv, title):
+        return self.client.post(
+            reverse('ai_lab_chatbot:rename', args=[conv.id]),
+            data=json.dumps({'title': title}),
+            content_type='application/json',
+        )
+
+    def test_rename_returns_title_and_display_title(self):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        self.client.login(username='leo', password='secret')
+
+        resp = self._post(conv, 'Weekend plans')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(),
+                         {'title': 'Weekend plans', 'display_title': 'Weekend plans'})
+        conv.refresh_from_db()
+        self.assertEqual(conv.title, 'Weekend plans')
+
+    def test_blank_title_keeps_previous(self):
+        conv = Conversation.objects.create(
+            user_id=self.user.id, username='leo', title='Old name')
+        self.client.login(username='leo', password='secret')
+
+        # Blank save is a no-op; the response echoes the unchanged title.
+        resp = self._post(conv, '   ')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['title'], 'Old name')
+        self.assertEqual(resp.json()['display_title'], 'Old name')
+        conv.refresh_from_db()
+        self.assertEqual(conv.title, 'Old name')
+
+    def test_rename_requires_post(self):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        self.client.login(username='leo', password='secret')
+        resp = self.client.get(reverse('ai_lab_chatbot:rename', args=[conv.id]))
+        self.assertEqual(resp.status_code, 405)
+
+    def test_cannot_rename_other_users_conversation(self):
+        conv = Conversation.objects.create(user_id=self.other.id, username='sam')
+        self.client.login(username='leo', password='secret')
+        resp = self._post(conv, 'mine now')
+        self.assertEqual(resp.status_code, 404)
+        conv.refresh_from_db()
+        self.assertEqual(conv.title, '')
+
+    def test_rename_requires_login(self):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        resp = self._post(conv, 'x')
+        self.assertEqual(resp.status_code, 302)
 
 
 class TitleViewTests(TestCase):

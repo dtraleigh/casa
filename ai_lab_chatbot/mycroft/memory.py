@@ -83,6 +83,20 @@ def toggle_favorite(user, conversation_id):
     return conversation
 
 
+def rename_conversation(user, conversation_id, title):
+    """Set a conversation's title (owner-scoped; raises Conversation.DoesNotExist
+    otherwise). A blank title is a no-op — the existing name is kept, so an
+    accidental empty save can't wipe a title. Renaming isn't activity, so
+    updated_at is left untouched via update_fields — same rationale as
+    toggle_favorite."""
+    conversation = Conversation.objects.get(id=conversation_id, user_id=user.id)
+    new_title = (title or '').strip()[:200]
+    if new_title:
+        conversation.title = new_title
+        conversation.save(update_fields=['title'])
+    return conversation
+
+
 def delete_conversation(user, conversation_id):
     """Delete the user's conversation (cascades to its messages). Raises
     Conversation.DoesNotExist if it isn't theirs."""

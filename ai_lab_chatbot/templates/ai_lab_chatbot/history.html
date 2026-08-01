@@ -124,6 +124,81 @@ document.addEventListener('DOMContentLoaded', function () {
         e.preventDefault();
         onToggle(btn);
     });
+
+    // --- Inline rename -----------------------------------------------------
+    // Swap a row's title link for an edit field on pencil-click; POST on Save.
+    function enterEdit(row) {
+        row.querySelector('.conv-link').classList.add('d-none');
+        row.querySelector('.conv-edit').classList.add('d-none');
+        const editor = row.querySelector('.conv-rename');
+        editor.classList.remove('d-none');
+        const field = editor.querySelector('.conv-rename-input');
+        field.focus();
+        field.select();
+    }
+
+    function exitEdit(row) {
+        row.querySelector('.conv-rename').classList.add('d-none');
+        row.querySelector('.conv-link').classList.remove('d-none');
+        row.querySelector('.conv-edit').classList.remove('d-none');
+    }
+
+    function saveRename(row) {
+        const editor = row.querySelector('.conv-rename');
+        const field = editor.querySelector('.conv-rename-input');
+        const saveBtn = editor.querySelector('.conv-rename-save');
+        saveBtn.disabled = true;
+        fetch(row.dataset.renameUrl, {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': csrftoken,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ title: field.value }),
+        }).then(function (r) {
+            if (!r.ok) throw new Error('Request failed');
+            return r.json();
+        }).then(function (data) {
+            // Label shows the resolved display_title (snippet fallback when the
+            // title was cleared); the field keeps the raw stored title.
+            row.querySelector('.conv-title-text').textContent = data.display_title;
+            // defaultValue too, so a later Cancel reverts to this saved name.
+            field.value = data.title;
+            field.defaultValue = data.title;
+            exitEdit(row);
+        }).catch(function () {
+            /* leave the editor open on failure so the edit isn't lost */
+        }).finally(function () {
+            saveBtn.disabled = false;
+        });
+    }
+
+    document.addEventListener('click', function (e) {
+        const editBtn = e.target.closest('.conv-edit');
+        if (editBtn) { enterEdit(editBtn.closest('.list-group-item')); return; }
+        const saveBtn = e.target.closest('.conv-rename-save');
+        if (saveBtn) { saveRename(saveBtn.closest('.list-group-item')); return; }
+        const cancelBtn = e.target.closest('.conv-rename-cancel');
+        if (cancelBtn) {
+            const row = cancelBtn.closest('.list-group-item');
+            // Restore the field to the last-saved title before closing.
+            row.querySelector('.conv-rename-input').value =
+                row.querySelector('.conv-rename-input').defaultValue;
+            exitEdit(row);
+        }
+    });
+
+    // Enter saves, Escape cancels, from within the rename field.
+    document.addEventListener('keydown', function (e) {
+        const field = e.target.closest('.conv-rename-input');
+        if (!field) return;
+        const row = field.closest('.list-group-item');
+        if (e.key === 'Enter') { e.preventDefault(); saveRename(row); }
+        else if (e.key === 'Escape') {
+            field.value = field.defaultValue;
+            exitEdit(row);
+        }
+    });
 });
 </script>
 {% endblock %}

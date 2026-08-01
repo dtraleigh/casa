@@ -4,7 +4,8 @@ All-conversations sections. `data-updated` (ISO 8601, UTC) lets the JS re-insert
 the row in updated_at-descending order when its favorite state is toggled.
 {% endcomment %}
 <div class="list-group-item d-flex align-items-center gap-2"
-     data-updated="{{ c.updated_at.isoformat }}">
+     data-updated="{{ c.updated_at.isoformat }}"
+     data-rename-url="{% url 'ai_lab_chatbot:rename' c.id %}">
     <button type="button"
             class="fav-star btn btn-link p-0 lh-1 {% if c.is_favorite %}is-fav{% endif %}"
             data-url="{% url 'ai_lab_chatbot:favorite' c.id %}"
@@ -14,10 +15,28 @@ the row in updated_at-descending order when its favorite state is toggled.
         <i class="bi {% if c.is_favorite %}bi-star-fill{% else %}bi-star{% endif %}"></i>
     </button>
     <a href="{% url 'ai_lab_chatbot:conversation' c.id %}"
-       class="flex-grow-1 text-decoration-none text-body">
-        <div class="fw-semibold">{{ c.display_title }}</div>
+       class="conv-link flex-grow-1 text-decoration-none text-body">
+        <div class="fw-semibold conv-title-text">{{ c.display_title }}</div>
         <div class="small text-muted">{{ c.updated_at|timesince }} ago</div>
     </a>
+    {% comment %}
+       Inline rename editor, revealed by the pencil. Prefilled with the stored
+       title (blank when the name is still auto-generated) so editing starts
+       from the real value, not the snippet fallback.
+    {% endcomment %}
+    <div class="conv-rename flex-grow-1 d-none">
+        <div class="input-group input-group-sm">
+            <input type="text" class="form-control conv-rename-input"
+                   value="{{ c.title }}" maxlength="200"
+                   placeholder="Conversation name" aria-label="Conversation name">
+            <button type="button" class="btn btn-primary conv-rename-save">Save</button>
+            <button type="button" class="btn btn-outline-secondary conv-rename-cancel">Cancel</button>
+        </div>
+    </div>
+    <button type="button" class="conv-edit btn btn-link p-0 lh-1 text-muted"
+            aria-label="Rename conversation" title="Rename">
+        <i class="bi bi-pencil"></i>
+    </button>
     <form method="post" action="{% url 'ai_lab_chatbot:delete' c.id %}"
           onsubmit="return confirm('Delete this conversation? This cannot be undone.');">
         {% csrf_token %}

@@ -99,6 +99,31 @@ def toggle_favorite_view(request, conversation_id):
 
 @login_required
 @require_http_methods(["POST"])
+def rename_conversation_view(request, conversation_id):
+    """Rename a conversation to a user-supplied title. An empty/blank title
+    clears back to the auto-generated fallback; the response carries both the
+    stored title (for the edit field) and the resolved display_title (for the
+    label the user sees)."""
+    try:
+        payload = json.loads(request.body)
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest("Invalid JSON body.")
+
+    try:
+        conversation = memory.rename_conversation(
+            request.user, conversation_id, payload.get('title', '')
+        )
+    except Conversation.DoesNotExist:
+        raise Http404("No such conversation.")
+
+    return JsonResponse({
+        'title': conversation.title,
+        'display_title': conversation.display_title(),
+    })
+
+
+@login_required
+@require_http_methods(["POST"])
 def delete_conversation_view(request, conversation_id):
     """Delete one of the user's conversations, then return to history."""
     try:
