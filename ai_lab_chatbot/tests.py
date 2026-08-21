@@ -893,6 +893,129 @@ class TitleViewTests(TestCase):
         mock_complete.assert_not_called()
 
 
+class ParseFactListTests(TestCase):
+    """Unit tests for the defensive JSON-array parse (no DB, no Ollama)."""
+
+    def test_bare_array(self):
+        self.assertEqual(
+            memory._parse_fact_list('["A fact.", "Another fact."]'),
+            ['A fact.', 'Another fact.'],
+        )
+
+    def test_code_fence_and_prose_tolerated(self):
+        raw = 'Sure, here you go:\n```json\n["Leo has a garden."]\n```'
+        self.assertEqual(memory._parse_fact_list(raw), ['Leo has a garden.'])
+
+    def test_empty_array(self):
+        self.assertEqual(memory._parse_fact_list('[]'), [])
+
+    def test_non_json_yields_empty(self):
+        self.assertEqual(memory._parse_fact_list('I found nothing durable.'), [])
+
+    def test_blank_and_non_string_items_dropped(self):
+        self.assertEqual(
+            memory._parse_fact_list('["Real fact.", "", "   ", 42, null]'),
+            ['Real fact.'],
+        )
+
+    def test_count_is_capped(self):
+        raw = json.dumps([f"Fact {i}." for i in range(20)])
+        self.assertEqual(len(memory._parse_fact_list(raw)),
+                         memory._MAX_LEARNED_PER_EXCHANGE)
+
+
+class LearnFromExchangeTests(TestCase):
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='secret')
+        self.conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        memory.add_message(self.conv, 'user', 'We got a dog named Biscuit.')
+        memory.add_message(self.conv, 'assistant', 'Congrats on Biscuit!')
+        self.url = reverse('ai_lab_chatbot:learn', args=[self.conv.id])
+        self.client.login(username='leo', password='secret')
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_creates_learned_facts_attributed_to_user(self, mock_complete):
+        mock_complete.return_value = (
+            '["The household has a dog named Biscuit.", "Leo has a garden."]'
+        )
+        resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()['learned']), 2)
+
+        facts = HouseholdFact.objects.filter(source='learned')
+        self.assertEqual(facts.count(), 2)
+        for fact in facts:
+            self.assertEqual(fact.source_user_id, self.user.id)
+            self.assertEqual(fact.source_username, 'leo')
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_exact_text_duplicate_is_skipped(self, mock_complete):
+        HouseholdFact.objects.create(
+            content='The household has a dog named Biscuit.', source='admin'
+        )
+        # Same fact, different casing/whitespace/trailing period.
+        mock_complete.return_value = '["  the household has a DOG named   Biscuit  "]'
+        resp = self.client.post(self.url)
+        self.assertEqual(resp.json()['learned'], [])
+        self.assertEqual(
+            HouseholdFact.objects.filter(
+                content__icontains='Biscuit').count(),
+            1,
+        )
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_within_batch_duplicate_is_skipped(self, mock_complete):
+        mock_complete.return_value = (
+            '["Leo has a garden.", "leo has a garden"]'
+        )
+        resp = self.client.post(self.url)
+        self.assertEqual(len(resp.json()['learned']), 1)
+        self.assertEqual(HouseholdFact.objects.count(), 1)
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_empty_extraction_creates_nothing(self, mock_complete):
+        mock_complete.return_value = '[]'
+        resp = self.client.post(self.url)
+        self.assertEqual(resp.json()['learned'], [])
+        self.assertEqual(HouseholdFact.objects.count(), 0)
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_garbage_reply_creates_nothing(self, mock_complete):
+        mock_complete.return_value = 'I did not find any durable facts.'
+        resp = self.client.post(self.url)
+        self.assertEqual(resp.json()['learned'], [])
+        self.assertEqual(HouseholdFact.objects.count(), 0)
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat',
+           side_effect=RuntimeError('ollama down'))
+    def test_failure_is_swallowed(self, mock_complete):
+        with self.assertLogs('ai_lab_chatbot.mycroft.memory', level='ERROR'):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['learned'], [])
+        self.assertEqual(HouseholdFact.objects.count(), 0)
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_missing_assistant_turn_is_noop(self, mock_complete):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        memory.add_message(conv, 'user', 'Hi there.')
+        resp = self.client.post(
+            reverse('ai_lab_chatbot:learn', args=[conv.id]))
+        self.assertEqual(resp.json()['learned'], [])
+        mock_complete.assert_not_called()
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_other_users_conversation_is_404(self, mock_complete):
+        other = User.objects.create_user(username='sam', password='x')
+        conv = Conversation.objects.create(user_id=other.id, username='sam')
+        resp = self.client.post(
+            reverse('ai_lab_chatbot:learn', args=[conv.id]))
+        self.assertEqual(resp.status_code, 404)
+        mock_complete.assert_not_called()
+
+
 class DeleteViewTests(TestCase):
     databases = DBS
 

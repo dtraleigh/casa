@@ -265,3 +265,21 @@ def generate_title_view(request, conversation_id):
         conversation.save(update_fields=['title', 'updated_at'])
 
     return JsonResponse({'title': title})
+
+
+@login_required
+@require_http_methods(["POST"])
+def learn_from_exchange_view(request, conversation_id):
+    """Mine durable HouseholdFacts from the conversation's latest exchange
+    (Phase 3b auto-learning). Called fire-and-forget by the browser after each
+    reply, off the streaming path. Best-effort — a failure returns an empty list
+    rather than an error, so the chat is never affected."""
+    try:
+        conversation = Conversation.objects.get(
+            id=conversation_id, user_id=request.user.id
+        )
+    except Conversation.DoesNotExist:
+        raise Http404("No such conversation.")
+
+    learned = memory.learn_from_exchange(conversation, request.user)
+    return JsonResponse({'learned': learned})

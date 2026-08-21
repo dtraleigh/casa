@@ -38,7 +38,7 @@ class Personality(models.Model):
 class HouseholdFact(models.Model):
     """Facts about the household, shared across all users' conversations.
 
-    Phase 1 is admin-curated only; Phase 4 adds auto-learning from
+    Phase 1 is admin-curated only; Phase 3b adds auto-learning from
     conversations, which is why source attribution fields already exist.
     """
     SOURCE_CHOICES = [
@@ -46,15 +46,40 @@ class HouseholdFact(models.Model):
         ('learned', 'Learned from conversation'),
     ]
 
-    content = models.TextField(help_text="A single fact about the household.")
+    content = models.TextField(
+        help_text=(
+            "One specific, durable fact about the household, written as a "
+            "standalone sentence. Add a separate row for each fact rather than "
+            "listing several here. "
+            'Examples: "The household is based in Raleigh, NC." — '
+            '"Leo\'s wife is named Jennifer." — "Trash pickup is Tuesday mornings."'
+        )
+    )
     source = models.CharField(
-        max_length=20, choices=SOURCE_CHOICES, default='admin'
+        max_length=20, choices=SOURCE_CHOICES, default='admin',
+        help_text=(
+            'Leave as "Admin-curated" for facts you add by hand. '
+            '"Learned from conversation" is set automatically by auto-learning '
+            "(Phase 3b) — you won't normally choose it yourself."
+        ),
     )
     # Decoupled user reference: auth.User lives in the `default` DB while this
     # model lives in `ai_lab`, so no cross-DB ForeignKey. Unused in Phase 1;
-    # populated by Phase 4 auto-learning.
-    source_user_id = models.IntegerField(null=True, blank=True)
-    source_username = models.CharField(max_length=150, blank=True)
+    # populated by Phase 3b auto-learning.
+    source_user_id = models.IntegerField(
+        null=True, blank=True,
+        help_text=(
+            "Auto-learning only: the id of the user who was talking when this "
+            "fact was extracted. Leave blank for hand-entered facts."
+        ),
+    )
+    source_username = models.CharField(
+        max_length=150, blank=True,
+        help_text=(
+            "Auto-learning only: the username who was talking when this fact "
+            "was extracted. Leave blank for hand-entered facts."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -126,7 +151,7 @@ class Conversation(models.Model):
 class Message(models.Model):
     """One turn in a Conversation. Only 'user' and 'assistant' roles are stored
     in Phase 2; the assembled system prompt is never persisted. `role` stays a
-    plain CharField so Phase 3 can add 'tool' without a migration."""
+    plain CharField so Phase 4 can add 'tool' without a migration."""
     id = models.BigAutoField(primary_key=True)
     conversation = models.ForeignKey(
         Conversation, on_delete=models.CASCADE, related_name='messages'

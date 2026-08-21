@@ -2,16 +2,19 @@
 
 Keeps DB concerns out of the view: creating/fetching conversations (scoped to
 their owner), writing messages, and assembling the sliding-window history sent
-to Ollama. Phase 3 (tool messages) and Phase 4 (embeddings, auto-learning) hook
-in here rather than in the HTTP layer.
+to Ollama. Phase 4 (tool messages), Phase 3 (embeddings, retrieval), and Phase 3b
+(auto-learning) hook in here rather than in the HTTP layer.
 """
+import json
 import logging
+import re
 
 from django.conf import settings
 from pgvector.django import CosineDistance
 
-from ai_lab_chatbot.models import Conversation, Knowledge, Message
-from ai_lab_chatbot.mycroft.client import embed_text
+from ai_lab_chatbot.models import Conversation, HouseholdFact, Knowledge, Message
+from ai_lab_chatbot.mycroft.client import complete_chat, embed_text
+from ai_lab_chatbot.mycroft.prompts import build_extraction_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -176,3 +179,93 @@ def retrieve_memories(user, query_vec, *, exclude_conversation_id=None):
     )
 
     return knowledge, messages
+
+
+# --- Auto-learning (Phase 3b) ----------------------------------------------
+
+# Cap on facts accepted from one exchange, so a runaway reply can't flood the
+# shared table.
+_MAX_LEARNED_PER_EXCHANGE = 5
+
+
+def _normalize_fact(text):
+    """Comparison key for exact-text dedup: lowercased, whitespace-collapsed,
+    trailing period stripped. Two facts with the same key are treated as one."""
+    return re.sub(r'\s+', ' ', text).strip().rstrip('.').lower()
+
+
+def _parse_fact_list(raw):
+    """Pull a list of fact strings out of the model's reply, defensively.
+
+    The extraction prompt asks for a bare JSON array, but models wander — they
+    wrap it in ```json fences or add a sentence of preamble. We slice from the
+    first '[' to the last ']' and parse that, keeping only non-empty strings and
+    capping the count. Any parse failure yields [] (learn nothing this turn)
+    rather than raising.
+    """
+    if not raw:
+        return []
+    start = raw.find('[')
+    end = raw.rfind(']')
+    if start == -1 or end <= start:
+        return []
+    try:
+        items = json.loads(raw[start:end + 1])
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(items, list):
+        return []
+    facts = []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            facts.append(item.strip())
+        if len(facts) >= _MAX_LEARNED_PER_EXCHANGE:
+            break
+    return facts
+
+
+def learn_from_exchange(conversation, user):
+    """Mine durable HouseholdFacts from a conversation's latest exchange.
+
+    Best-effort and off the streaming path (called from its own endpoint): asks
+    Mycroft to extract durable facts from the last user+assistant turns, then
+    writes each new one as a `source='learned'` HouseholdFact attributed to
+    `user`. Exact-text duplicates of existing facts are skipped. Any failure
+    (Ollama down, unparseable reply, DB hiccup) is logged and swallowed —
+    auto-learning must never surface an error to the caller. Returns the list of
+    newly created fact strings (possibly empty).
+    """
+    try:
+        user_msg = conversation.messages.filter(role='user').last()
+        assistant_msg = conversation.messages.filter(role='assistant').last()
+        if not (user_msg and assistant_msg):
+            return []
+
+        raw = complete_chat(
+            build_extraction_prompt(
+                user_msg.content, assistant_msg.content, user.username
+            )
+        )
+        candidates = _parse_fact_list(raw)
+        if not candidates:
+            return []
+
+        # Small table — load all existing facts and dedup in Python.
+        seen = {_normalize_fact(f.content) for f in HouseholdFact.objects.all()}
+        created = []
+        for content in candidates:
+            key = _normalize_fact(content)
+            if key in seen:
+                continue
+            seen.add(key)
+            HouseholdFact.objects.create(
+                content=content,
+                source='learned',
+                source_user_id=user.id,
+                source_username=user.username,
+            )
+            created.append(content)
+        return created
+    except Exception:
+        logger.exception("Mycroft auto-learning failed")
+        return []

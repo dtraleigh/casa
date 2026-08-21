@@ -421,6 +421,15 @@ document.addEventListener('DOMContentLoaded', function () {
         } catch (e) { /* leave the default title */ }
     }
 
+    // After each completed exchange, ask the server to mine durable household
+    // facts from it (Phase 3b auto-learning). Fire-and-forget and off the
+    // streaming path — a failure is harmless and invisible to the chat.
+    function learnFromExchange() {
+        fetch('/mycroft/conversation/' + conversationId + '/learn/', {
+            method: 'POST', headers: { 'X-CSRFToken': csrftoken },
+        }).catch(function () { /* nothing to do — best-effort */ });
+    }
+
     form.addEventListener('submit', async function (e) {
         e.preventDefault();
         const text = input.value.trim();
@@ -538,6 +547,11 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (respIsNew && conversationId && assistantText) {
             generateTitle();
+        }
+        // Mine facts from every completed exchange, not just the first. Guarded
+        // on `completed` so a truncated reply isn't mined.
+        if (conversationId && assistantText && completed) {
+            learnFromExchange();
         }
 
         if (notice) addNotice(notice);

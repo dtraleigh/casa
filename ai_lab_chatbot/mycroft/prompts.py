@@ -94,3 +94,36 @@ def build_title_prompt(first_user, first_assistant):
         },
         {'role': 'user', 'content': exchange},
     ]
+
+
+def build_extraction_prompt(user_text, assistant_text, username):
+    """Messages asking Mycroft to mine durable household facts from one exchange.
+
+    Returns a small message list for a non-streaming completion (Phase 3b
+    auto-learning). Kept terse and self-contained — no personality — so the model
+    stays focused on extraction, not conversation. The reply is expected to be a
+    JSON array of fact strings (empty when nothing qualifies); `memory.py` parses
+    it defensively.
+    """
+    exchange = f"User: {user_text}\n\nAssistant: {assistant_text}"
+    speaker = username or "the user"
+    return [
+        {
+            'role': 'system',
+            'content': (
+                "You extract durable facts about a household and its members from "
+                "a single chat exchange, to be remembered long-term. Include only "
+                "clear, lasting facts worth keeping: names, relationships, pets, "
+                "vehicles, addresses, jobs, and ongoing preferences or routines. "
+                "Exclude anything transient (moods, what someone is doing right "
+                "now, today's weather), questions, speculation, and anything that "
+                "sounds like it was shared in confidence. Be conservative — when "
+                "in doubt, leave it out. Write each fact as one short standalone "
+                f"sentence, naming the person where known (the speaker is "
+                f"{speaker}), e.g. \"Leo's dog is named Biscuit.\" Reply with ONLY "
+                "a JSON array of fact strings, and [] when nothing qualifies. No "
+                "prose, no code fences, no commentary."
+            ),
+        },
+        {'role': 'user', 'content': exchange},
+    ]

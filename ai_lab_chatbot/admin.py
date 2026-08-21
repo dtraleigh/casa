@@ -15,9 +15,32 @@ class PersonalityAdmin(admin.ModelAdmin):
 
 @admin.register(HouseholdFact)
 class HouseholdFactAdmin(admin.ModelAdmin):
-    list_display = ('content_preview', 'source', 'updated_at')
+    # source + source_username surface auto-learned facts (Phase 3b) at a glance:
+    # filter source='learned' to review what Mycroft picked up and prune as needed.
+    list_display = ('content_preview', 'source', 'source_username', 'updated_at')
     list_filter = ('source',)
-    search_fields = ('content',)
+    search_fields = ('content', 'source_username')
+    date_hierarchy = 'created_at'
+    readonly_fields = ('created_at', 'updated_at')
+    fieldsets = (
+        (None, {
+            'description': (
+                "Facts here are shared across every user's conversations with "
+                "Mycroft. Enter one clear, durable fact per row — for a "
+                "hand-added fact, fill in the content and leave the rest as-is."
+            ),
+            'fields': ('content', 'source'),
+        }),
+        ('Source attribution (set automatically by auto-learning)', {
+            'classes': ('collapse',),
+            'description': "Leave blank when adding a fact by hand.",
+            'fields': ('source_user_id', 'source_username'),
+        }),
+        ('Timestamps', {
+            'classes': ('collapse',),
+            'fields': ('created_at', 'updated_at'),
+        }),
+    )
 
     @admin.display(description='Content')
     def content_preview(self, obj):

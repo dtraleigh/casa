@@ -1,7 +1,7 @@
 """Tool definitions and dispatch for Mycroft.
 
 Phase 1 has no tools — this module exists so prompt assembly can ask for tool
-descriptions without a conditional. Phase 3 (weather) populates it.
+descriptions without a conditional. Phase 4 (weather) populates it.
 """
 
 
