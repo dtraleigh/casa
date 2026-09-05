@@ -9,9 +9,10 @@ from django.urls import reverse
 
 from ai_lab_chatbot.models import (
     Personality, HouseholdFact, UserContext, Conversation, Message, Knowledge,
+    MycroftConfig,
 )
 from ai_lab_chatbot.mycroft import memory
-from ai_lab_chatbot.mycroft.client import stream_chat
+from ai_lab_chatbot.mycroft.client import stream_chat, complete_chat, list_models
 from ai_lab_chatbot.mycroft.prompts import build_system_prompt, STANDARD_GUARDRAILS
 
 
@@ -1045,3 +1046,197 @@ class DeleteViewTests(TestCase):
         self.client.login(username='leo', password='secret')
         resp = self.client.get(reverse('ai_lab_chatbot:delete', args=[conv.id]))
         self.assertEqual(resp.status_code, 405)
+
+
+class ListModelsTests(TestCase):
+    """The installed-models helper: names extracted, non-chat models dropped by
+    Ollama capabilities (with a name-based fallback), sorted, best-effort on
+    failure."""
+
+    @staticmethod
+    def _resp(*names):
+        return SimpleNamespace(
+            models=[SimpleNamespace(model=n) for n in names])
+
+    @staticmethod
+    def _show(caps):
+        """A `.show()` return with the given capabilities list (or None for a
+        server that doesn't report them)."""
+        return SimpleNamespace(capabilities=caps)
+
+    def _wire(self, mock_client, list_resp, caps_by_name):
+        """Point the mocked client at a `.list()` result and a per-name
+        `.show()` capabilities map (value None -> no capabilities reported;
+        an Exception instance -> `.show()` raises for that model)."""
+        mock_client.return_value.list.return_value = list_resp
+
+        def show(name):
+            caps = caps_by_name.get(name)
+            if isinstance(caps, Exception):
+                raise caps
+            return self._show(caps)
+
+        mock_client.return_value.show.side_effect = show
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_keeps_chat_models_drops_embedder_by_capability(self, mock_client):
+        # The embedder carries a :latest tag the old exact-match would miss;
+        # capabilities catch it regardless.
+        self._wire(
+            mock_client,
+            self._resp('mistral', 'llama3.1:8b', 'nomic-embed-text:latest'),
+            {
+                'mistral': ['completion', 'tools'],
+                'llama3.1:8b': ['completion'],
+                'nomic-embed-text:latest': ['embedding'],
+            },
+        )
+        self.assertEqual(list_models(), ['llama3.1:8b', 'mistral'])
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_falls_back_to_name_when_capabilities_absent(self, mock_client):
+        # No capabilities reported -> drop the configured embed model by base
+        # name (tag-tolerant), keep the rest.
+        embed = settings.OLLAMA_EMBED_MODEL
+        self._wire(
+            mock_client,
+            self._resp('llama3.1:8b', f'{embed}:latest'),
+            {'llama3.1:8b': None, f'{embed}:latest': None},
+        )
+        self.assertEqual(list_models(), ['llama3.1:8b'])
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_show_raising_falls_back_without_blowing_up(self, mock_client):
+        # A `.show()` failure for one model is tolerated (treated as unknown ->
+        # name fallback); the rest of the list still resolves.
+        embed = settings.OLLAMA_EMBED_MODEL
+        self._wire(
+            mock_client,
+            self._resp('llama3.1:8b', embed),
+            {'llama3.1:8b': RuntimeError('boom'), embed: RuntimeError('boom')},
+        )
+        self.assertEqual(list_models(), ['llama3.1:8b'])
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_tolerates_dict_entries(self, mock_client):
+        self._wire(
+            mock_client,
+            SimpleNamespace(models=[{'model': 'llama3.1:8b'}, {'name': 'phi3'}]),
+            {'llama3.1:8b': ['completion'], 'phi3': ['completion']},
+        )
+        self.assertEqual(list_models(), ['llama3.1:8b', 'phi3'])
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_failure_returns_empty(self, mock_client):
+        mock_client.return_value.list.side_effect = RuntimeError('down')
+        self.assertEqual(list_models(), [])
+
+
+class ModelPassthroughTests(TestCase):
+    """stream_chat / complete_chat send the requested model, or the configured
+    default when none is given."""
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_stream_chat_uses_given_model(self, mock_client):
+        mock_client.return_value.chat.return_value = iter([])
+        list(stream_chat([], model='mistral'))
+        self.assertEqual(
+            mock_client.return_value.chat.call_args.kwargs['model'], 'mistral')
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_stream_chat_defaults_to_setting(self, mock_client):
+        mock_client.return_value.chat.return_value = iter([])
+        list(stream_chat([]))
+        self.assertEqual(
+            mock_client.return_value.chat.call_args.kwargs['model'],
+            settings.OLLAMA_CHAT_MODEL)
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_complete_chat_uses_given_model(self, mock_client):
+        mock_client.return_value.chat.return_value = SimpleNamespace(
+            message=SimpleNamespace(content='hi'))
+        complete_chat([], model='mistral')
+        self.assertEqual(
+            mock_client.return_value.chat.call_args.kwargs['model'], 'mistral')
+
+
+class MycroftConfigTests(TestCase):
+    databases = DBS
+
+    def test_default_model_falls_back_to_setting_when_blank(self):
+        self.assertEqual(
+            MycroftConfig.default_model(), settings.OLLAMA_CHAT_MODEL)
+
+    def test_default_model_returns_stored_value(self):
+        cfg = MycroftConfig.get_solo()
+        cfg.default_chat_model = 'mistral'
+        cfg.save()
+        self.assertEqual(MycroftConfig.default_model(), 'mistral')
+
+    def test_is_singleton(self):
+        MycroftConfig.get_solo()
+        second = MycroftConfig(default_chat_model='phi3')
+        second.save()
+        self.assertEqual(MycroftConfig.objects.count(), 1)
+        self.assertEqual(MycroftConfig.objects.get().pk, 1)
+
+
+class ModelSelectorViewTests(TestCase):
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='secret')
+        self.client.login(username='leo', password='secret')
+
+    @patch('ai_lab_chatbot.views.list_models',
+           return_value=['llama3.1:8b', 'mistral'])
+    def test_chat_view_bootstraps_models_and_default(self, _mock):
+        resp = self.client.get(reverse('ai_lab_chatbot:chat'))
+        boot = resp.context['bootstrap']
+        self.assertEqual(boot['selected_model'], settings.OLLAMA_CHAT_MODEL)
+        self.assertIn('mistral', boot['models'])
+        # The selected model is always present as an option, even if not listed.
+        self.assertIn(settings.OLLAMA_CHAT_MODEL, boot['models'])
+
+    @patch('ai_lab_chatbot.views.list_models', return_value=[])
+    def test_resume_view_uses_conversation_model(self, _mock):
+        conv = Conversation.objects.create(
+            user_id=self.user.id, username='leo', model='mistral')
+        resp = self.client.get(
+            reverse('ai_lab_chatbot:conversation', args=[conv.id]))
+        boot = resp.context['bootstrap']
+        self.assertEqual(boot['selected_model'], 'mistral')
+        self.assertIn('mistral', boot['models'])
+
+    @patch('ai_lab_chatbot.views.list_models', return_value=['mistral'])
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_send_uses_and_persists_chosen_model(self, mock_stream, _mock):
+        mock_stream.return_value = iter(['Hi'])
+        resp = self.client.post(
+            reverse('ai_lab_chatbot:send'),
+            data=json.dumps({'conversation_id': None, 'content': 'hello',
+                             'model': 'mistral'}),
+            content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        b''.join(resp.streaming_content)  # drain the generator (persists turns)
+
+        self.assertEqual(mock_stream.call_args.kwargs['model'], 'mistral')
+        conv = Conversation.objects.get(user_id=self.user.id)
+        self.assertEqual(conv.model, 'mistral')
+        assistant = conv.messages.get(role='assistant')
+        self.assertEqual(assistant.model, 'mistral')
+
+    @patch('ai_lab_chatbot.views.list_models', return_value=['llama3.1:8b'])
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_send_without_model_uses_default(self, mock_stream, _mock):
+        MycroftConfig.get_solo()  # blank default → setting fallback
+        mock_stream.return_value = iter(['Hi'])
+        resp = self.client.post(
+            reverse('ai_lab_chatbot:send'),
+            data=json.dumps({'conversation_id': None, 'content': 'hello'}),
+            content_type='application/json')
+        b''.join(resp.streaming_content)
+        self.assertEqual(
+            mock_stream.call_args.kwargs['model'], settings.OLLAMA_CHAT_MODEL)
+        conv = Conversation.objects.get(user_id=self.user.id)
+        self.assertEqual(conv.model, settings.OLLAMA_CHAT_MODEL)

@@ -52,8 +52,15 @@
                     Send
                 </button>
             </form>
-            <div class="form-text small mt-1">
-                Enter to send · Shift+Enter for a new line
+            <div class="d-flex justify-content-between align-items-center mt-1 gap-2 flex-wrap">
+                <div class="form-text small mb-0">
+                    Enter to send · Shift+Enter for a new line
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <label for="model-select" class="form-text small text-muted mb-0">Model</label>
+                    <select id="model-select" class="form-select form-select-sm w-auto"
+                            aria-label="Chat model"></select>
+                </div>
             </div>
             <div id="context-footer" class="form-text small text-muted mt-1"
                  data-num-ctx="{{ mycroft_num_ctx }}"></div>
@@ -82,6 +89,26 @@ document.addEventListener('DOMContentLoaded', function () {
     // snippet fallback, but the edit field always starts from the real value.
     let currentTitle = boot.title || '';
     if (boot.title) titleEl.textContent = boot.title;
+
+    // Model selector. Populated from the installed models the server rendered;
+    // `currentModel` is sent with each message and remembered on the
+    // conversation server-side. Falls back to the single selected model when the
+    // list is empty (e.g. Ollama unreachable at page load).
+    const modelSelect = document.getElementById('model-select');
+    let currentModel = boot.selected_model || '';
+    const modelNames = (boot.models && boot.models.length)
+        ? boot.models
+        : (currentModel ? [currentModel] : []);
+    for (const name of modelNames) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        if (name === currentModel) opt.selected = true;
+        modelSelect.appendChild(opt);
+    }
+    modelSelect.addEventListener('change', function () {
+        currentModel = modelSelect.value;
+    });
 
     // The rename control only makes sense once the conversation is persisted.
     function showEditIfPersisted() {
@@ -166,10 +193,15 @@ document.addEventListener('DOMContentLoaded', function () {
         applyWidth(widthSelect.value);
     });
 
-    function addBubble(role, text) {
+    function addBubble(role, text, model) {
         const wrapper = document.createElement('div');
-        wrapper.className = 'd-flex mb-3 ' +
-            (role === 'user' ? 'justify-content-end' : 'justify-content-start');
+        // Assistant turns stack as a column so the model caption sits beneath the
+        // bubble; the bubble stays a direct child of the wrapper so existing
+        // parentElement lookups (scroll/remove) keep working.
+        wrapper.className = 'mb-3 d-flex ' +
+            (role === 'user'
+                ? 'justify-content-end'
+                : 'flex-column align-items-start');
         const bubble = document.createElement('div');
         bubble.className = 'p-2 px-3 rounded ' +
             (role === 'user' ? 'bg-primary text-white' : 'bg-light border');
@@ -178,8 +210,22 @@ document.addEventListener('DOMContentLoaded', function () {
         bubble.textContent = text;
         wrapper.appendChild(bubble);
         messagesEl.appendChild(wrapper);
+        if (role === 'assistant' && model) setBubbleModel(bubble, model);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return bubble;
+    }
+
+    // Attach (or update) the small muted model caption under an assistant bubble.
+    // No-op without a model name (user turns, pre-feature rows).
+    function setBubbleModel(bubble, model) {
+        if (!model) return;
+        let caption = bubble.parentElement.querySelector('.model-caption');
+        if (!caption) {
+            caption = document.createElement('div');
+            caption.className = 'model-caption small text-muted mt-1';
+            bubble.parentElement.appendChild(caption);
+        }
+        caption.textContent = model;
     }
 
     // Show a "still working" indicator in an as-yet-empty assistant bubble.
@@ -395,7 +441,7 @@ document.addEventListener('DOMContentLoaded', function () {
         firstMessage = false;
         for (const m of boot.messages) {
             if (m.role === 'assistant') {
-                renderMessage(addBubble('assistant', ''), m.content);
+                renderMessage(addBubble('assistant', '', m.model), m.content);
             } else {
                 addBubble('user', m.content);
             }
@@ -459,6 +505,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // chat learns its id here); is_new marks the first exchange.
         let respConvId = null;
         let respIsNew = false;
+        let respModel = null;   // the model the server actually used (done frame)
         const wasNew = !conversationId;
 
         try {
@@ -471,6 +518,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 body: JSON.stringify({
                     conversation_id: conversationId,
                     content: text,
+                    model: currentModel,
                 }),
             });
 
@@ -517,6 +565,7 @@ document.addEventListener('DOMContentLoaded', function () {
                         notice = 'Mycroft hit an error and stopped.';
                     } else if (frame.type === 'done') {
                         completed = true;
+                        if (frame.model) respModel = frame.model;
                     }
                 }
             }
@@ -534,6 +583,10 @@ document.addEventListener('DOMContentLoaded', function () {
             // Nothing came back — drop the empty assistant bubble (the user turn
             // stays; the server already recorded it as part of the transcript).
             assistantBubble.parentElement.remove();
+        } else {
+            // Caption the reply with the model that produced it (server-reported;
+            // falls back to the selected model on a truncated/errored stream).
+            setBubbleModel(assistantBubble, respModel || currentModel);
         }
 
         // First send of a fresh chat: point the URL at the now-persisted

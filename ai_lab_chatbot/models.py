@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 from pgvector.django import VectorField
 
@@ -125,6 +126,10 @@ class Conversation(models.Model):
     user_id = models.IntegerField(db_index=True)
     username = models.CharField(max_length=150, blank=True)
     title = models.CharField(max_length=200, blank=True)
+    # Ollama chat model this conversation is using (the model selector). Blank
+    # resolves to MycroftConfig.default_model() at send time — so pre-feature
+    # conversations and fresh ones both fall back to the current default.
+    model = models.CharField(max_length=100, blank=True)
     # Pinned by the user to a Favorites section on the History page. Toggling it
     # deliberately does NOT bump updated_at (favoriting isn't activity).
     is_favorite = models.BooleanField(default=False, db_index=True)
@@ -169,6 +174,10 @@ class Message(models.Model):
         null=True, blank=True,
         help_text="Ollama eval_count for this message.",
     )
+    # Chat model that produced this turn — set on assistant turns for the model
+    # selector, so replies stay attributable when the model is switched mid-chat.
+    # Blank for user turns and every pre-feature row.
+    model = models.CharField(max_length=100, blank=True)
     # nomic-embed-text vector for semantic recall (Phase 3), set best-effort just
     # after the row is written. Null for pre-feature rows and any turn whose embed
     # call failed — such rows simply aren't retrievable.
@@ -200,3 +209,42 @@ class Knowledge(models.Model):
 
     def __str__(self):
         return self.topic
+
+
+class MycroftConfig(models.Model):
+    """Singleton runtime config for Mycroft, editable in admin. Always row pk=1.
+
+    Currently holds just the default chat model new conversations start on;
+    kept as a model (not a setting) so it's changeable without a deploy.
+    """
+    default_chat_model = models.CharField(
+        max_length=100, blank=True,
+        help_text=(
+            "Model new chats start on. Pick from the installed models; leave "
+            "blank to fall back to the OLLAMA_CHAT_MODEL setting."
+        ),
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Mycroft configuration"
+        verbose_name_plural = "Mycroft configuration"
+
+    def __str__(self):
+        return "Mycroft configuration"
+
+    def save(self, *args, **kwargs):
+        # Pin to a single row so there's exactly one config.
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    @classmethod
+    def default_model(cls):
+        """The configured default chat model, or the OLLAMA_CHAT_MODEL setting
+        when unset — never returns empty."""
+        return cls.get_solo().default_chat_model or settings.OLLAMA_CHAT_MODEL

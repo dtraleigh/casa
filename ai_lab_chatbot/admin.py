@@ -1,9 +1,12 @@
+from django import forms
 from django.contrib import admin
 
 from ai_lab_chatbot.models import (
     Personality, HouseholdFact, UserContext, Conversation, Message, Knowledge,
+    MycroftConfig,
 )
 from ai_lab_chatbot.mycroft import memory
+from ai_lab_chatbot.mycroft.client import list_models
 
 
 @admin.register(Personality)
@@ -59,8 +62,8 @@ class MessageInline(admin.TabularInline):
     model = Message
     extra = 0
     can_delete = False
-    fields = ('role', 'content', 'created_at')
-    readonly_fields = ('role', 'content', 'created_at')
+    fields = ('role', 'content', 'model', 'created_at')
+    readonly_fields = ('role', 'content', 'model', 'created_at')
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -68,8 +71,8 @@ class MessageInline(admin.TabularInline):
 
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
-    list_display = ('display_title', 'username', 'user_id', 'is_favorite', 'updated_at')
-    list_filter = ('is_favorite',)
+    list_display = ('display_title', 'username', 'user_id', 'model', 'is_favorite', 'updated_at')
+    list_filter = ('is_favorite', 'model')
     search_fields = ('title', 'username', 'messages__content')
     readonly_fields = ('id', 'user_id', 'username', 'created_at', 'updated_at')
     inlines = [MessageInline]
@@ -77,8 +80,8 @@ class ConversationAdmin(admin.ModelAdmin):
 
 @admin.register(Message)
 class MessageAdmin(admin.ModelAdmin):
-    list_display = ('conversation', 'role', 'content_preview', 'created_at')
-    list_filter = ('role',)
+    list_display = ('conversation', 'role', 'content_preview', 'model', 'created_at')
+    list_filter = ('role', 'model')
     search_fields = ('content',)
 
     @admin.display(description='Content')
@@ -104,3 +107,42 @@ class KnowledgeAdmin(admin.ModelAdmin):
         row saved with a null vector rather than blocking the edit."""
         super().save_model(request, obj, form, change)
         memory.embed_knowledge(obj)
+
+
+class MycroftConfigForm(forms.ModelForm):
+    """Renders `default_chat_model` as a dropdown of installed Ollama models so
+    the default is picked, not typed. The current value and a blank
+    "use the setting default" option are always included, and if Ollama is
+    unreachable the field degrades to just those so the config still saves."""
+
+    class Meta:
+        model = MycroftConfig
+        fields = ['default_chat_model']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        current = self.instance.default_chat_model
+        # dict.fromkeys de-dups while preserving order (installed first).
+        names = list(dict.fromkeys(
+            [*list_models(), *( [current] if current else [] )]
+        ))
+        choices = [('', '— use OLLAMA_CHAT_MODEL default —')]
+        choices += [(n, n) for n in names]
+        self.fields['default_chat_model'] = forms.ChoiceField(
+            choices=choices, required=False,
+            help_text=MycroftConfig._meta.get_field('default_chat_model').help_text,
+        )
+
+
+@admin.register(MycroftConfig)
+class MycroftConfigAdmin(admin.ModelAdmin):
+    form = MycroftConfigForm
+    list_display = ('__str__', 'default_chat_model', 'updated_at')
+    readonly_fields = ('updated_at',)
+
+    def has_add_permission(self, request):
+        # Singleton — allow creating the one row only if it doesn't exist yet.
+        return not MycroftConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False

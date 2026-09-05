@@ -9,9 +9,9 @@ from django.http import (
 from django.shortcuts import render, redirect
 from django.views.decorators.http import require_http_methods
 
-from ai_lab_chatbot.models import Conversation
+from ai_lab_chatbot.models import Conversation, MycroftConfig
 from ai_lab_chatbot.mycroft import memory
-from ai_lab_chatbot.mycroft.client import stream_chat, complete_chat
+from ai_lab_chatbot.mycroft.client import stream_chat, complete_chat, list_models
 from ai_lab_chatbot.mycroft.prompts import build_system_prompt, build_title_prompt
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ def _frame(type_, **fields):
 def _serialize_messages(conversation):
     """The full transcript for rendering a resumed conversation in the page."""
     return [
-        {'role': m.role, 'content': m.content}
+        {'role': m.role, 'content': m.content, 'model': m.model}
         for m in conversation.messages.all()
     ]
 
@@ -43,13 +43,25 @@ def _last_context(conversation):
     }
 
 
+def _model_options(selected):
+    """Installed chat models for the selector, guaranteed to include `selected`
+    (so a conversation on a since-removed model still shows it), sorted."""
+    options = set(list_models())
+    if selected:
+        options.add(selected)
+    return sorted(options)
+
+
 @login_required
 def chat_view(request):
     """A fresh chat page. The conversation is created lazily on first send."""
+    default_model = MycroftConfig.default_model()
     return render(request, 'ai_lab_chatbot/chat.html', {
         'bootstrap': {
             'conversation_id': None, 'title': '', 'messages': [],
             'context': None,
+            'models': _model_options(default_model),
+            'selected_model': default_model,
         },
         'mycroft_num_ctx': settings.MYCROFT_NUM_CTX,
     })
@@ -65,12 +77,15 @@ def resume_view(request, conversation_id):
     except Conversation.DoesNotExist:
         raise Http404("No such conversation.")
 
+    selected_model = conversation.model or MycroftConfig.default_model()
     return render(request, 'ai_lab_chatbot/chat.html', {
         'bootstrap': {
             'conversation_id': str(conversation.id),
             'title': conversation.display_title(),
             'messages': _serialize_messages(conversation),
             'context': _last_context(conversation),
+            'models': _model_options(selected_model),
+            'selected_model': selected_model,
         },
         'mycroft_num_ctx': settings.MYCROFT_NUM_CTX,
     })
@@ -146,6 +161,7 @@ def send_message(request):
         payload = json.loads(request.body)
         conversation_id = payload.get('conversation_id')
         content = (payload.get('content') or '').strip()
+        requested_model = (payload.get('model') or '').strip()
     except (json.JSONDecodeError, AttributeError):
         return HttpResponseBadRequest("Invalid JSON body.")
 
@@ -160,6 +176,17 @@ def send_message(request):
         raise Http404("No such conversation.")
 
     is_new = conversation.messages.count() == 0
+
+    # Resolve and remember the model for this turn: an explicit dropdown choice
+    # wins, else the conversation's stored model, else the global default. The
+    # dropdown only offers installed models, so a bad pick just surfaces via the
+    # stream error frame — no pre-send validation round-trip to Ollama.
+    chosen_model = (
+        requested_model or conversation.model or MycroftConfig.default_model()
+    )
+    if conversation.model != chosen_model:
+        conversation.model = chosen_model
+        conversation.save(update_fields=['model'])
 
     user_msg = memory.add_message(conversation, 'user', content)
     # Embed the incoming turn (best-effort) and reuse that vector to pull in
@@ -185,7 +212,7 @@ def send_message(request):
         errored = False
         stats = {}  # populated from Ollama's final chunk (token counts, timings)
         try:
-            for piece in stream_chat(messages, stats_out=stats):
+            for piece in stream_chat(messages, stats_out=stats, model=chosen_model):
                 assistant_text += piece
                 yield _frame('token', content=piece)
         except Exception as exc:
@@ -205,6 +232,7 @@ def send_message(request):
                 conversation, 'assistant', assistant_text,
                 prompt_tokens=stats.get('prompt_tokens'),
                 completion_tokens=stats.get('completion_tokens'),
+                model=chosen_model,
             )
             # Embed the reply too (best-effort) so Mycroft's own answers are
             # recallable later, not just the user's turns.
@@ -219,7 +247,8 @@ def send_message(request):
             # 'done' is absent if the worker is killed mid-stream (gunicorn's
             # abort raises SystemExit, bypassing the except above). The client
             # treats a missing 'done' as a truncated response.
-            yield _frame('done', conversation_id=str(conversation.id), is_new=is_new)
+            yield _frame('done', conversation_id=str(conversation.id),
+                         is_new=is_new, model=chosen_model)
 
     response = StreamingHttpResponse(
         token_stream(), content_type='application/x-ndjson'
@@ -253,7 +282,8 @@ def generate_title_view(request, conversation_id):
 
     try:
         title = complete_chat(
-            build_title_prompt(first_user.content, first_assistant.content)
+            build_title_prompt(first_user.content, first_assistant.content),
+            model=conversation.model or None,
         )
         title = title.strip().strip('"').strip()[:200]
     except Exception:

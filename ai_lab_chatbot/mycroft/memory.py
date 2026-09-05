@@ -52,12 +52,13 @@ def history_for_prompt(conversation, limit=None):
 
 
 def add_message(conversation, role, content,
-                prompt_tokens=None, completion_tokens=None):
-    """Persist one turn. Token counts are set only on assistant turns backed by
-    a real Ollama completion; they stay null otherwise."""
+                prompt_tokens=None, completion_tokens=None, model=''):
+    """Persist one turn. Token counts and `model` are set only on assistant turns
+    backed by a real Ollama completion; they stay null/blank otherwise."""
     return Message.objects.create(
         conversation=conversation, role=role, content=content,
         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        model=model,
     )
 
 
@@ -244,7 +245,8 @@ def learn_from_exchange(conversation, user):
         raw = complete_chat(
             build_extraction_prompt(
                 user_msg.content, assistant_msg.content, user.username
-            )
+            ),
+            model=conversation.model or None,
         )
         candidates = _parse_fact_list(raw)
         if not candidates:
