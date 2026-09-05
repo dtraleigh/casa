@@ -105,6 +105,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 OLLAMA_HOST = env("OLLAMA_HOST", default="http://localhost:11434")
 OLLAMA_CHAT_MODEL = env("OLLAMA_CHAT_MODEL", default="llama3.1:8b")
 
+# Per-request timeout (seconds) applied to every Ollama call. Generous by
+# default because a cold model load plus a long generation can run well past
+# httpx's ~5s default. A refused connection still fails fast; this only bounds
+# how long a *hung* Ollama can block a request.
+OLLAMA_TIMEOUT = env.int("OLLAMA_TIMEOUT", default=900)
+
 # How many trailing messages of a conversation are sent to Ollama as context
 # (the sliding window). The full transcript is always stored and displayed.
 MYCROFT_HISTORY_WINDOW = env.int("MYCROFT_HISTORY_WINDOW", default=20)

@@ -8,7 +8,7 @@ from ollama import Client
 
 
 def _client() -> Client:
-    return Client(host=settings.OLLAMA_HOST)
+    return Client(host=settings.OLLAMA_HOST, timeout=settings.OLLAMA_TIMEOUT)
 
 
 def list_models():
