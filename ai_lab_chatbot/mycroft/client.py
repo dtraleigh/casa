@@ -3,12 +3,75 @@
 Thin layer over the `ollama` package. Knows how to stream a chat completion;
 it does not manage conversation history or prompts (that's the view's job).
 """
+import logging
+
 from django.conf import settings
 from ollama import Client
+
+# Runtime-fit log: one line per query recording how Ollama loaded the model
+# (GPU/CPU split, size, context). Routed to its own file via LOGGING config.
+logger = logging.getLogger('mycroft.ollama')
 
 
 def _client() -> Client:
     return Client(host=settings.OLLAMA_HOST, timeout=settings.OLLAMA_TIMEOUT)
+
+
+def _human_size(n):
+    """Bytes -> a compact `17GB` / `274MB` string, matching `ollama ps`."""
+    n = n or 0
+    if n >= 1024 ** 3:
+        return f'{n / 1024 ** 3:.1f}GB'
+    if n >= 1024 ** 2:
+        return f'{n / 1024 ** 2:.0f}MB'
+    return f'{n}B'
+
+
+def _processor(size, size_vram):
+    """The CPU/GPU split `ollama ps` shows, from resident vs VRAM size.
+
+    `size_vram` is the portion resident on the GPU; the rest is on CPU/RAM. All
+    on GPU -> '100% GPU'; none -> '100% CPU'; otherwise 'CPU%/GPU% CPU/GPU'.
+    """
+    size = size or 0
+    vram = size_vram or 0
+    if size <= 0:
+        return '?'
+    if vram <= 0:
+        return '100% CPU'
+    if vram >= size:
+        return '100% GPU'
+    gpu = round(vram / size * 100)
+    return f'{100 - gpu}%/{gpu}% CPU/GPU'
+
+
+def log_ps(event):
+    """Log a one-line snapshot of Ollama's currently-loaded models.
+
+    Called after a query completes. Records, per loaded model, its name, resident
+    size, the CPU/GPU split and context window — the same figures `ollama ps`
+    prints. `event` is a short tag for what just ran ('chat stream done'); the
+    datetime and level are added by the logging formatter.
+
+    Best-effort: any failure is swallowed so logging never touches the chat path.
+    """
+    try:
+        models = getattr(_client().ps(), 'models', None) or []
+        if not models:
+            logger.info('%s | no models loaded', event)
+            return
+        parts = []
+        for m in models:
+            name = getattr(m, 'name', None) or getattr(m, 'model', None) or '?'
+            piece = (f'{name} {_human_size(getattr(m, "size", 0))} '
+                     f'{_processor(getattr(m, "size", 0), getattr(m, "size_vram", 0))}')
+            ctx = getattr(m, 'context_length', None)
+            if ctx:
+                piece += f' ctx={ctx}'
+            parts.append(piece)
+        logger.info('%s | %s', event, '; '.join(parts))
+    except Exception:
+        pass
 
 
 def list_models():
@@ -90,6 +153,8 @@ def stream_chat(messages, stats_out=None, model=None):
                 'eval_duration_ms': (chunk.eval_duration or 0) / 1e6,
                 'total_duration_ms': (chunk.total_duration or 0) / 1e6,
             })
+    # Fires once the consumer exhausts the stream — the model is loaded by now.
+    log_ps('chat stream done')
 
 
 def embed_text(text) -> list[float]:
@@ -98,6 +163,7 @@ def embed_text(text) -> list[float]:
     best-effort so a stumble never breaks the chat path.
     """
     resp = _client().embed(model=settings.OLLAMA_EMBED_MODEL, input=text)
+    log_ps('embed done')
     return list(resp.embeddings[0])
 
 
@@ -114,4 +180,5 @@ def complete_chat(messages, model=None) -> str:
         messages=messages,
         stream=False,
     )
+    log_ps('chat complete done')
     return (resp.message.content or '').strip()

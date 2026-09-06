@@ -166,6 +166,14 @@ LOGGING = {
             'maxBytes': 10 * 1024 * 1024,  # 10MB
             'backupCount': 3,
         },
+        'ollama_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': '/var/log/django/ollama.log',
+            'formatter': 'verbose',
+            'maxBytes': 10 * 1024 * 1024,  # 10MB
+            'backupCount': 3,
+        },
     },
 
     'loggers': {
@@ -186,6 +194,12 @@ LOGGING = {
         },
         'away_mode': {
             'handlers': ['away_mode_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Per-query Ollama runtime-fit snapshots (GPU/CPU split, size, context).
+        'mycroft.ollama': {
+            'handlers': ['ollama_file'],
             'level': 'INFO',
             'propagate': False,
         },
