@@ -426,11 +426,59 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     input.addEventListener('input', autoGrow);
 
+    // Prompt history — press Up/Down in the input to recall messages you've
+    // sent this session, shell-style. Seeded from the resumed transcript so
+    // recall works immediately on a reopened conversation; each send appends.
+    const promptHistory = boot.messages
+        .filter(function (m) { return m.role === 'user'; })
+        .map(function (m) { return m.content; });
+    let historyIndex = promptHistory.length;  // one past the end == live draft
+    let historyDraft = '';                     // the unsent text, stashed while browsing
+
+    // Only hijack Up/Down when the caret is a collapsed point on the edge line,
+    // so cursor movement inside a multi-line draft (Shift+Enter) still works.
+    function caretOnFirstLine() {
+        return input.selectionStart === input.selectionEnd &&
+            input.value.lastIndexOf('\n', input.selectionStart - 1) === -1;
+    }
+    function caretOnLastLine() {
+        return input.selectionStart === input.selectionEnd &&
+            input.value.indexOf('\n', input.selectionEnd) === -1;
+    }
+
+    // Step through history. delta -1 = older, +1 = newer. Returns true if it
+    // consumed the key (so the caller suppresses the default caret movement).
+    function recallHistory(delta) {
+        if (!promptHistory.length) return false;
+        if (historyIndex === promptHistory.length) {
+            if (delta > 0) return false;      // at the draft already; nothing newer
+            historyDraft = input.value;       // entering history — stash the draft
+        }
+        const next = historyIndex + delta;
+        if (next < 0) return false;           // already at the oldest entry
+        if (next >= promptHistory.length) {
+            historyIndex = promptHistory.length;
+            input.value = historyDraft;       // stepped past newest — restore draft
+        } else {
+            historyIndex = next;
+            input.value = promptHistory[next];
+        }
+        autoGrow();
+        const end = input.value.length;       // caret to end so a further Up recalls on
+        input.setSelectionRange(end, end);
+        return true;
+    }
+
     // Enter sends; Shift+Enter inserts a newline (the browser default).
+    // Up/Down recall prior prompts when the caret sits on the first/last line.
     input.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             form.requestSubmit();
+        } else if (e.key === 'ArrowUp' && caretOnFirstLine()) {
+            if (recallHistory(-1)) e.preventDefault();
+        } else if (e.key === 'ArrowDown' && caretOnLastLine()) {
+            if (recallHistory(1)) e.preventDefault();
         }
     });
 
@@ -480,6 +528,11 @@ document.addEventListener('DOMContentLoaded', function () {
         e.preventDefault();
         const text = input.value.trim();
         if (!text) return;
+
+        // Record the sent prompt and reset the recall cursor back to the draft.
+        promptHistory.push(text);
+        historyIndex = promptHistory.length;
+        historyDraft = '';
 
         if (firstMessage) {
             messagesEl.innerHTML = '';
