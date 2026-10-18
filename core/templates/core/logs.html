@@ -1,0 +1,139 @@
+{% extends 'base.html' %}
+
+{% block title %}Logs - Casa{% endblock %}
+
+{% block extra_css %}
+<style>
+    .log-view {
+        height: 70vh;
+        overflow: auto;
+        font-family: SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: .8rem;
+        background: #1e1e1e;
+        color: #d4d4d4;
+    }
+    .log-entry { white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
+    .log-entry .ts { color: #808080; }
+    .log-entry .name { color: #9cdcfe; }
+    .log-level { display: inline-block; min-width: 4.5em; font-weight: 600; }
+    .log-level-DEBUG { color: #6a6a6a; }
+    .log-level-INFO { color: #4ec9b0; }
+    .log-level-WARNING { color: #dcdcaa; }
+    .log-level-ERROR, .log-level-CRITICAL { color: #f48771; }
+    .log-entry.is-error { background: rgba(244, 135, 113, .08); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4 px-md-4">
+    {% if not available %}
+        <div class="alert alert-secondary">No file-based log handlers are configured in settings.LOGGING.</div>
+    {% else %}
+        <ul class="nav nav-pills mb-3">
+            {% for l in available %}
+                <li class="nav-item">
+                    <a class="nav-link {% if l.key == log.key %}active{% endif %}"
+                       href="?log={{ l.key }}&lines={{ lines }}&level={{ level }}">
+                        <i class="bi bi-journal-text me-1" aria-hidden="true"></i>{{ l.label }}
+                    </a>
+                </li>
+            {% endfor %}
+        </ul>
+
+        <form method="get" class="row g-2 align-items-end mb-2">
+            <input type="hidden" name="log" value="{{ log.key }}">
+            <div class="col-6 col-md-auto">
+                <label class="form-label small mb-0" for="backup">File</label>
+                <select class="form-select form-select-sm" id="backup" name="backup" onchange="this.form.submit()">
+                    <option value="0">{{ log.label }} (current)</option>
+                    {% for b in log.backups %}
+                        <option value="{{ b.index }}" {% if b.index == backup %}selected{% endif %}>
+                            {{ b.name }} ({{ b.mtime|date:"M j, H:i" }})
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md-auto">
+                <label class="form-label small mb-0" for="lines">Search last</label>
+                <select class="form-select form-select-sm" id="lines" name="lines" onchange="this.form.submit()">
+                    {% for n in line_choices %}
+                        <option value="{{ n }}" {% if n == lines %}selected{% endif %}>{{ n }} lines</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md-auto">
+                <label class="form-label small mb-0" for="level">Min level</label>
+                <select class="form-select form-select-sm" id="level" name="level" onchange="this.form.submit()">
+                    {% for lv in level_choices %}
+                        <option value="{{ lv }}" {% if lv == level %}selected{% endif %}>{{ lv }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md">
+                <label class="form-label small mb-0" for="q">Contains</label>
+                <input class="form-control form-control-sm" id="q" name="q" value="{{ query }}" placeholder="e.g. DisallowedHost">
+            </div>
+            <div class="col-12 col-md-auto d-flex gap-2">
+                <button type="submit" class="btn btn-sm btn-primary">
+                    <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>Refresh
+                </button>
+                <a class="btn btn-sm btn-outline-secondary"
+                   href="{% url 'log_download' %}?log={{ log.key }}&backup={{ backup }}">
+                    <i class="bi bi-download me-1" aria-hidden="true"></i>Download
+                </a>
+            </div>
+        </form>
+
+        <div class="d-flex flex-wrap justify-content-between small text-muted mb-1">
+            <span>
+                {{ file_name }}
+                {% if file_info %}&middot; {{ file_info.size|filesizeformat }} &middot; modified {{ file_info.mtime|date:"M j, Y H:i:s" }}{% endif %}
+                {% if not error %}&middot; {{ entries|length }} entr{{ entries|length|pluralize:"y,ies" }}{% endif %}
+            </span>
+            <div class="form-check form-switch m-0">
+                <input class="form-check-input" type="checkbox" id="auto-refresh">
+                <label class="form-check-label" for="auto-refresh">Auto-refresh (10s)</label>
+            </div>
+        </div>
+
+        {% if error %}
+            <div class="alert alert-warning">{{ error }}</div>
+        {% else %}
+            <div class="log-view rounded border p-2" id="log-view">
+                {% for e in entries %}
+                    <div class="log-entry {% if e.level == 'ERROR' or e.level == 'CRITICAL' %}is-error{% endif %}">{% if e.timestamp %}<span class="ts">[{{ e.timestamp }}]</span> <span class="log-level log-level-{{ e.level }}">{{ e.level }}</span> <span class="name">{{ e.logger }}</span>: {% endif %}{{ e.message }}</div>
+                {% empty %}
+                    <div class="text-muted">No matching entries.</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+    {{ block.super }}
+    <script>
+        (function () {
+            // Newest entries are at the bottom, like `tail`.
+            var view = document.getElementById('log-view');
+            if (view) view.scrollTop = view.scrollHeight;
+
+            var toggle = document.getElementById('auto-refresh');
+            if (!toggle) return;
+            var KEY = 'casa.logs.autoRefresh';
+            try { toggle.checked = localStorage.getItem(KEY) === '1'; } catch (e) {}
+
+            var timer = null;
+            function schedule() {
+                clearTimeout(timer);
+                if (toggle.checked) timer = setTimeout(function () { location.reload(); }, 10000);
+            }
+            toggle.addEventListener('change', function () {
+                try { localStorage.setItem(KEY, toggle.checked ? '1' : '0'); } catch (e) {}
+                schedule();
+            });
+            schedule();
+        })();
+    </script>
+{% endblock %}

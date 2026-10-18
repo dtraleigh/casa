@@ -1,10 +1,15 @@
-from django.http import HttpResponseRedirect
+from django.http import FileResponse, Http404, HttpResponseRedirect
 from django.shortcuts import render
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth import authenticate, login, logout
-import subprocess, logging
+import os, subprocess, logging
+
+from . import logs
 
 logger = logging.getLogger(__name__)
+
+LOG_LINE_CHOICES = [200, 500, 1000, 5000, 20000]
+LOG_LEVEL_CHOICES = ['ALL', 'INFO', 'WARNING', 'ERROR']
 
 def casa_login(request):
     message = "Log in to Emo Casa"
@@ -97,3 +102,77 @@ def dashboard_view(request):
         'runtime_minutes': runtime_minutes,
         'current_watts': current_watts
     })
+
+
+def _staff(user):
+    return user.is_staff
+
+
+def _selected_log(request, available):
+    """(log dict, backup index, path) from the query string, 404 if not whitelisted."""
+    key = request.GET.get('log') or (available[0]['key'] if available else '')
+    try:
+        backup = int(request.GET.get('backup', 0))
+    except ValueError:
+        raise Http404("Unknown log")
+    path = logs.resolve_log(key, backup)
+    if path is None:
+        raise Http404("Unknown log")
+    log = next(l for l in available if l['key'] == key)
+    return log, backup, path
+
+
+@login_required
+@user_passes_test(_staff)
+def logs_view(request):
+    available = logs.available_logs()
+    if not available:
+        return render(request, 'core/logs.html', {'available': available})
+
+    log, backup, path = _selected_log(request, available)
+
+    try:
+        lines = int(request.GET.get('lines', 500))
+    except ValueError:
+        lines = 500
+    if lines not in LOG_LINE_CHOICES:
+        lines = 500
+    level = request.GET.get('level', 'ALL')
+    if level not in LOG_LEVEL_CHOICES:
+        level = 'ALL'
+    query = request.GET.get('q', '').strip()
+
+    entries = []
+    error = None
+    try:
+        entries = logs.group_entries(logs.tail_lines(path, lines))
+        entries = logs.filter_entries(entries, min_level=None if level == 'ALL' else level, query=query)
+    except FileNotFoundError:
+        error = f"{os.path.basename(path)} doesn't exist yet."
+    except PermissionError:
+        error = f"The web server doesn't have permission to read {path}."
+
+    return render(request, 'core/logs.html', {
+        'available': available,
+        'log': log,
+        'backup': backup,
+        'file_name': os.path.basename(path),
+        'file_info': logs.file_info(path),
+        'entries': entries,
+        'error': error,
+        'lines': lines,
+        'level': level,
+        'query': query,
+        'line_choices': LOG_LINE_CHOICES,
+        'level_choices': LOG_LEVEL_CHOICES,
+    })
+
+
+@login_required
+@user_passes_test(_staff)
+def log_download_view(request):
+    _, _, path = _selected_log(request, logs.available_logs())
+    try:
+        return FileResponse(open(path, 'rb'), as_attachment=True, filename=os.path.basename(path))
+    except OSError:
+        raise Http404("Log not readable")
