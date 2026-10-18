@@ -26,6 +26,11 @@
             </div>
             {# Icon-only actions keep the header on one row at phone width. #}
             <div class="d-flex align-items-center gap-1 flex-shrink-0">
+                {# Revealed once the transcript has a message. #}
+                <button type="button" id="copy-conv" class="btn btn-sm btn-outline-light d-none"
+                        aria-label="Copy conversation" title="Copy conversation">
+                    <i class="bi bi-clipboard" aria-hidden="true"></i>
+                </button>
                 <a href="{% url 'ai_lab_chatbot:chat' %}" class="btn btn-sm btn-outline-light"
                    aria-label="New conversation" title="New conversation">
                     <i class="bi bi-plus-lg" aria-hidden="true"></i>
@@ -265,22 +270,51 @@ document.addEventListener('DOMContentLoaded', function () {
         applyWidth(widthSelect.value);
     });
 
+    // Briefly swap a copy button's icon to show the result, then restore it.
+    function flashIcon(btn, ok) {
+        const icon = btn.querySelector('i');
+        icon.className = 'bi ' + (ok ? 'bi-check2' : 'bi-x');
+        clearTimeout(btn._flashTimer);
+        btn._flashTimer = setTimeout(function () {
+            icon.className = 'bi bi-clipboard';
+        }, 1500);
+    }
+
     function addBubble(role, text, model) {
         const wrapper = document.createElement('div');
-        // Assistant turns stack as a column so the model caption sits beneath the
-        // bubble; the bubble stays a direct child of the wrapper so existing
-        // parentElement lookups (scroll/remove) keep working.
-        wrapper.className = 'mb-3 d-flex ' +
-            (role === 'user'
-                ? 'justify-content-end'
-                : 'flex-column align-items-start');
+        // Turns stack as a column so the meta row (copy icon, model caption)
+        // sits beneath the bubble; the bubble stays a direct child of the
+        // wrapper so existing parentElement lookups (scroll/remove) keep working.
+        wrapper.className = 'mb-3 d-flex flex-column ' +
+            (role === 'user' ? 'align-items-end' : 'align-items-start');
+        wrapper.dataset.role = role;
         const bubble = document.createElement('div');
         bubble.className = 'p-2 px-3 rounded ' +
             (role === 'user' ? 'bg-primary text-white' : 'bg-light border');
         bubble.style.maxWidth = '80%';
         bubble.style.whiteSpace = 'pre-wrap';
         bubble.textContent = text;
+        // The raw text, for copying: rendered textContent loses code fences.
+        bubble.dataset.text = text;
         wrapper.appendChild(bubble);
+
+        const meta = document.createElement('div');
+        meta.className = 'msg-meta d-flex align-items-center gap-2 small text-muted mt-1';
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        // Hidden while empty (the "Thinking…" state); renderMessage reveals it.
+        copyBtn.className = 'btn btn-link btn-sm p-0 lh-1 text-muted' + (text ? '' : ' d-none');
+        copyBtn.setAttribute('aria-label', 'Copy message');
+        copyBtn.title = 'Copy message';
+        copyBtn.innerHTML = '<i class="bi bi-clipboard" aria-hidden="true"></i>';
+        copyBtn.addEventListener('click', function () {
+            copyText(bubble.dataset.text).then(
+                function () { flashIcon(copyBtn, true); },
+                function () { flashIcon(copyBtn, false); });
+        });
+        meta.appendChild(copyBtn);
+        wrapper.appendChild(meta);
+
         messagesEl.appendChild(wrapper);
         if (role === 'assistant' && model) setBubbleModel(bubble, model);
         messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -291,11 +325,12 @@ document.addEventListener('DOMContentLoaded', function () {
     // No-op without a model name (user turns, pre-feature rows).
     function setBubbleModel(bubble, model) {
         if (!model) return;
-        let caption = bubble.parentElement.querySelector('.model-caption');
+        const meta = bubble.parentElement.querySelector('.msg-meta');
+        let caption = meta.querySelector('.model-caption');
         if (!caption) {
-            caption = document.createElement('div');
-            caption.className = 'model-caption small text-muted mt-1';
-            bubble.parentElement.appendChild(caption);
+            caption = document.createElement('span');
+            caption.className = 'model-caption';
+            meta.appendChild(caption);
         }
         caption.textContent = model;
     }
@@ -486,6 +521,9 @@ document.addEventListener('DOMContentLoaded', function () {
     // blocks. Everything is set via textContent — model output is never treated
     // as HTML. Re-run wholesale on each token (cheap for a single-user app).
     function renderMessage(bubble, text) {
+        bubble.dataset.text = text;
+        bubble.parentElement.querySelector('.msg-meta button')
+            .classList.toggle('d-none', !text);
         bubble.textContent = '';
         for (const seg of parseSegments(text)) {
             if (seg.type === 'code') {
@@ -641,6 +679,33 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
+
+    // Whole-conversation copy. Plain text built from the DOM in display order,
+    // so it includes turns streamed this session. Tool calls get one line each
+    // (results are bulky JSON); notices and the empty state are skipped.
+    const copyConvBtn = document.getElementById('copy-conv');
+    function buildTranscript() {
+        const parts = [titleEl.textContent.trim()];
+        for (const el of messagesEl.children) {
+            if (el.dataset.role) {
+                const text = el.firstElementChild.dataset.text;
+                if (!text) continue;
+                parts.push((el.dataset.role === 'user' ? 'You' : 'Mycroft') + ':\n' + text);
+            } else if (el.classList.contains('tool-block')) {
+                parts.push('[' + el.querySelector('.tool-label').textContent.replace(/…$/, '') + ']');
+            }
+        }
+        return parts.join('\n\n') + '\n';
+    }
+    function showCopyConvIfAny() {
+        copyConvBtn.classList.toggle('d-none', !messagesEl.querySelector('[data-role]'));
+    }
+    copyConvBtn.addEventListener('click', function () {
+        copyText(buildTranscript()).then(
+            function () { flashIcon(copyConvBtn, true); },
+            function () { flashIcon(copyConvBtn, false); });
+    });
+    showCopyConvIfAny();
 
     // After the first exchange, ask the server for a short title (a separate
     // non-streaming call). Failure is harmless — the header keeps its default
@@ -841,6 +906,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         if (notice) addNotice(notice);
+        showCopyConvIfAny();
         setBusy(false);
     });
 });
