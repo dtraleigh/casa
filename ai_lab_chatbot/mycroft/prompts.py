@@ -208,7 +208,14 @@ def build_tool_router_prompt(recent, latest, tool_hints):
                 '"What\'s the weather tomorrow?" -> ["get_current_weather"]\n'
                 '"Should I bring a jacket tonight?" -> ["get_current_weather"]\n'
                 '"What is 2+2?" -> []\n'
-                '"When was Raleigh founded?" -> []\n\n'
+                '"When was Raleigh founded?" -> []\n'
+                # Bare follow-ups carry no topic of their own, so the router
+                # guessed; they need a tool only if the earlier topic did.
+                '"Give me 10 more" -> []\n'
+                '"Tell me more about that" -> []\n'
+                '"Just tell me the answer." -> []\n\n'
+                "A follow-up needs a tool only if it asks for more live data, "
+                "e.g. \"And tomorrow?\" after a weather question.\n\n"
                 "Reply with ONLY a JSON array of tool names, or [] for none."
             ),
         },

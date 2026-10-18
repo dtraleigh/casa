@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 import environ
 
@@ -198,6 +199,12 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
+        # Mycroft internals: tool routing decisions, tool and memory failures.
+        'ai_lab_chatbot.mycroft': {
+            'handlers': ['file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
         'away_mode': {
             'handlers': ['away_mode_file'],
             'level': 'INFO',
@@ -211,3 +218,11 @@ LOGGING = {
         },
     },
 }
+
+# `manage.py test` loads these same settings, so without this, test runs (mocked
+# router replies, deliberately triggered errors) land in the live log files.
+# assertLogs installs its own handler, so tests that check logging still work.
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    LOGGING['handlers'] = {
+        name: {'class': 'logging.NullHandler'} for name in LOGGING['handlers']
+    }

@@ -1899,6 +1899,21 @@ class SelectToolsTests(SimpleTestCase):
     def test_empty_array_is_no_tools(self, mock_complete):
         self.assertEqual(tools.select_tools([], 'What is 2+2?'), [])
 
+    @patch('ai_lab_chatbot.mycroft.tools.complete_chat',
+           return_value='["get_current_weather"]')
+    def test_decision_logged(self, mock_complete):
+        with self.assertLogs('ai_lab_chatbot.mycroft.tools', level='INFO') as cm:
+            tools.select_tools([], 'Give me 10 more')
+        [line] = cm.output
+        self.assertIn("['get_current_weather']", line)
+        self.assertIn("'Give me 10 more'", line)
+
+    @patch('ai_lab_chatbot.mycroft.tools.complete_chat', return_value='[]')
+    def test_prompt_covers_bare_follow_ups(self, mock_complete):
+        tools.select_tools([], 'x')
+        system = mock_complete.call_args.args[0][0]['content']
+        self.assertIn('"Give me 10 more" -> []', system)
+
     @patch('ai_lab_chatbot.mycroft.tools.complete_chat')
     def test_reply_parsing(self, mock_complete):
         cases = {

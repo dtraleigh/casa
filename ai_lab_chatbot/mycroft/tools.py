@@ -199,7 +199,11 @@ def select_tools(recent, latest, model=None):
     except Exception:
         logger.exception("Mycroft tool routing failed")
         return []
-    return _parse_tool_names(raw)
+    names = _parse_tool_names(raw)
+    # One line per message, so a misroute can be traced in the log viewer.
+    logger.info("Tool router picked %s for %r (raw reply %r)",
+                names, latest[:200], raw[:200])
+    return names
 
 
 def _parse_tool_names(raw):
