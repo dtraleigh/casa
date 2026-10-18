@@ -62,6 +62,7 @@ def chat_view(request):
             'context': None,
             'models': _model_options(default_model),
             'selected_model': default_model,
+            'mode': 'chat',
         },
         'mycroft_num_ctx': settings.MYCROFT_NUM_CTX,
     })
@@ -86,6 +87,7 @@ def resume_view(request, conversation_id):
             'context': _last_context(conversation),
             'models': _model_options(selected_model),
             'selected_model': selected_model,
+            'mode': conversation.mode,
         },
         'mycroft_num_ctx': settings.MYCROFT_NUM_CTX,
     })
@@ -196,7 +198,7 @@ def send_message(request):
         request.user, query_vec, exclude_conversation_id=conversation.id
     )
     system_prompt = build_system_prompt(
-        request.user, knowledge=knowledge, past=past
+        request.user, knowledge=knowledge, past=past, mode=conversation.mode
     )
     messages = (
         [{'role': 'system', 'content': system_prompt}]
@@ -299,11 +301,21 @@ def generate_title_view(request, conversation_id):
 
 @login_required
 @require_http_methods(["POST"])
+def start_learning_view(request):
+    """Start a "Teach Mycroft" learning conversation (Phase 3c) — seeded with
+    Mycroft's opening question — and open it."""
+    conversation = memory.start_learning_conversation(request.user)
+    return redirect('ai_lab_chatbot:conversation', conversation_id=conversation.id)
+
+
+@login_required
+@require_http_methods(["POST"])
 def learn_from_exchange_view(request, conversation_id):
-    """Mine durable HouseholdFacts from the conversation's latest exchange
-    (Phase 3b auto-learning). Called fire-and-forget by the browser after each
-    reply, off the streaming path. Best-effort — a failure returns an empty list
-    rather than an error, so the chat is never affected."""
+    """Apply the latest answer in a learning conversation to HouseholdFacts
+    (Phase 3c). Called by the browser after each reply in a learning chat, off
+    the streaming path; returns the changes so the chat can show them. Ordinary
+    chats get no changes. Best-effort — a failure returns empty lists rather
+    than an error, so the chat is never affected."""
     try:
         conversation = Conversation.objects.get(
             id=conversation_id, user_id=request.user.id
@@ -311,5 +323,4 @@ def learn_from_exchange_view(request, conversation_id):
     except Conversation.DoesNotExist:
         raise Http404("No such conversation.")
 
-    learned = memory.learn_from_exchange(conversation, request.user)
-    return JsonResponse({'learned': learned})
+    return JsonResponse(memory.apply_learning(conversation, request.user))

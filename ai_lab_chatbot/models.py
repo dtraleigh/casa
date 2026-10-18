@@ -39,8 +39,10 @@ class Personality(models.Model):
 class HouseholdFact(models.Model):
     """Facts about the household, shared across all users' conversations.
 
-    Phase 1 is admin-curated only; Phase 3b adds auto-learning from
-    conversations, which is why source attribution fields already exist.
+    Admin-curated, or learned in a dedicated "Teach Mycroft" learning
+    conversation (Phase 3c). A fact that changes is never edited in place by
+    learning: the old row is marked not-current and points at its replacement
+    via `superseded_by`, so history is kept. Only current facts reach prompts.
     """
     SOURCE_CHOICES = [
         ('admin', 'Admin-curated'),
@@ -60,27 +62,40 @@ class HouseholdFact(models.Model):
         max_length=20, choices=SOURCE_CHOICES, default='admin',
         help_text=(
             'Leave as "Admin-curated" for facts you add by hand. '
-            '"Learned from conversation" is set automatically by auto-learning '
-            "(Phase 3b) — you won't normally choose it yourself."
+            '"Learned from conversation" is set automatically by learning '
+            "chats — you won't normally choose it yourself."
         ),
     )
     # Decoupled user reference: auth.User lives in the `default` DB while this
-    # model lives in `ai_lab`, so no cross-DB ForeignKey. Unused in Phase 1;
-    # populated by Phase 3b auto-learning.
+    # model lives in `ai_lab`, so no cross-DB ForeignKey. Populated by learning
+    # chats.
     source_user_id = models.IntegerField(
         null=True, blank=True,
         help_text=(
-            "Auto-learning only: the id of the user who was talking when this "
+            "Learning only: the id of the user who was talking when this "
             "fact was extracted. Leave blank for hand-entered facts."
         ),
     )
     source_username = models.CharField(
         max_length=150, blank=True,
         help_text=(
-            "Auto-learning only: the username who was talking when this fact "
+            "Learning only: the username who was talking when this fact "
             "was extracted. Leave blank for hand-entered facts."
         ),
     )
+    # Supersession (Phase 3c). Non-current facts stay for history but are left
+    # out of every prompt. `superseded_by` is null for a retired fact (no longer
+    # true, no replacement) and for hand-unchecked ones.
+    is_current = models.BooleanField(
+        default=True, db_index=True,
+        help_text="Uncheck to keep the fact for history but stop Mycroft using it.",
+    )
+    superseded_by = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='supersedes',
+        help_text="The fact that replaced this one, if it changed.",
+    )
+    superseded_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -130,6 +145,13 @@ class Conversation(models.Model):
     # resolves to MycroftConfig.default_model() at send time — so pre-feature
     # conversations and fresh ones both fall back to the current default.
     model = models.CharField(max_length=100, blank=True)
+    # 'learning' conversations are "Teach Mycroft" interviews: Mycroft asks about
+    # the household and each answer is mined into HouseholdFacts. Ordinary
+    # 'chat' conversations never write facts.
+    MODE_CHOICES = [('chat', 'Chat'), ('learning', 'Learning')]
+    mode = models.CharField(
+        max_length=20, choices=MODE_CHOICES, default='chat', db_index=True
+    )
     # Pinned by the user to a Favorites section on the History page. Toggling it
     # deliberately does NOT bump updated_at (favoriting isn't activity).
     is_favorite = models.BooleanField(default=False, db_index=True)

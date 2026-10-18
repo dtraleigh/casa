@@ -13,7 +13,9 @@ from ai_lab_chatbot.models import (
 )
 from ai_lab_chatbot.mycroft import memory
 from ai_lab_chatbot.mycroft.client import stream_chat, complete_chat, list_models
-from ai_lab_chatbot.mycroft.prompts import build_system_prompt, STANDARD_GUARDRAILS
+from ai_lab_chatbot.mycroft.prompts import (
+    build_system_prompt, LEARNING_INSTRUCTIONS, STANDARD_GUARDRAILS,
+)
 
 
 # Models live in the `ai_lab` DB and auth.User in `default`; both are needed.
@@ -115,6 +117,20 @@ class BuildSystemPromptTests(TestCase):
         prompt = build_system_prompt(self.user)
         self.assertIn('Mycroft', prompt)
         self.assertIn(STANDARD_GUARDRAILS, prompt)
+
+    def test_superseded_facts_excluded(self):
+        HouseholdFact.objects.create(content='Lives at 12 Oak St.')
+        HouseholdFact.objects.create(content='Lives at 9 Elm Rd.', is_current=False)
+        prompt = build_system_prompt(self.user)
+        self.assertIn('12 Oak St', prompt)
+        self.assertNotIn('9 Elm Rd', prompt)
+
+    def test_learning_instructions_only_in_learning_mode(self):
+        self.assertNotIn(LEARNING_INSTRUCTIONS, build_system_prompt(self.user))
+        self.assertIn(
+            LEARNING_INSTRUCTIONS,
+            build_system_prompt(self.user, mode='learning'),
+        )
 
 
 class ConversationModelTests(TestCase):
@@ -473,7 +489,7 @@ class SendMessageViewTests(TestCase):
     def _stream_with_stats(tokens, stats):
         """A stream_chat stand-in that yields `tokens` and fills the caller's
         stats_out dict, mirroring a clean Ollama completion."""
-        def _side_effect(messages, stats_out=None):
+        def _side_effect(messages, stats_out=None, model=None):
             if stats_out is not None:
                 stats_out.update(stats)
             return iter(tokens)
@@ -894,99 +910,176 @@ class TitleViewTests(TestCase):
         mock_complete.assert_not_called()
 
 
-class ParseFactListTests(TestCase):
-    """Unit tests for the defensive JSON-array parse (no DB, no Ollama)."""
+class ParseFactOpsTests(TestCase):
+    """Unit tests for the defensive JSON-object parse (no DB, no Ollama)."""
 
-    def test_bare_array(self):
-        self.assertEqual(
-            memory._parse_fact_list('["A fact.", "Another fact."]'),
-            ['A fact.', 'Another fact.'],
-        )
+    def test_full_object(self):
+        raw = json.dumps({
+            'add': ['A fact.'],
+            'update': [{'id': 3, 'content': 'New text.'}],
+            'retire': [7],
+        })
+        self.assertEqual(memory._parse_fact_ops(raw), {
+            'add': ['A fact.'],
+            'update': [{'id': 3, 'content': 'New text.'}],
+            'retire': [7],
+        })
 
     def test_code_fence_and_prose_tolerated(self):
-        raw = 'Sure, here you go:\n```json\n["Leo has a garden."]\n```'
-        self.assertEqual(memory._parse_fact_list(raw), ['Leo has a garden.'])
-
-    def test_empty_array(self):
-        self.assertEqual(memory._parse_fact_list('[]'), [])
+        raw = 'Sure:\n```json\n{"add": ["Leo has a garden."]}\n```'
+        ops = memory._parse_fact_ops(raw)
+        self.assertEqual(ops['add'], ['Leo has a garden.'])
+        self.assertEqual(ops['update'], [])
+        self.assertEqual(ops['retire'], [])
 
     def test_non_json_yields_empty(self):
-        self.assertEqual(memory._parse_fact_list('I found nothing durable.'), [])
-
-    def test_blank_and_non_string_items_dropped(self):
         self.assertEqual(
-            memory._parse_fact_list('["Real fact.", "", "   ", 42, null]'),
-            ['Real fact.'],
+            memory._parse_fact_ops('Nothing to change.'),
+            {'add': [], 'update': [], 'retire': []},
         )
 
+    def test_bad_entries_dropped(self):
+        raw = json.dumps({
+            'add': ['Real fact.', '', '   ', 42, None],
+            'update': [{'id': 'x', 'content': 'Bad id.'},
+                       {'id': '4', 'content': 'Quoted id ok.'},
+                       {'id': 5, 'content': ''}, 'nope'],
+            'retire': ['9', True, None, 'abc'],
+        })
+        self.assertEqual(memory._parse_fact_ops(raw), {
+            'add': ['Real fact.'],
+            'update': [{'id': 4, 'content': 'Quoted id ok.'}],
+            'retire': [9],
+        })
+
+    def test_non_list_values_ignored(self):
+        ops = memory._parse_fact_ops('{"add": "Not a list.", "retire": 3}')
+        self.assertEqual(ops, {'add': [], 'update': [], 'retire': []})
+
     def test_count_is_capped(self):
-        raw = json.dumps([f"Fact {i}." for i in range(20)])
-        self.assertEqual(len(memory._parse_fact_list(raw)),
+        raw = json.dumps({'add': [f"Fact {i}." for i in range(20)]})
+        self.assertEqual(len(memory._parse_fact_ops(raw)['add']),
                          memory._MAX_LEARNED_PER_EXCHANGE)
 
 
-class LearnFromExchangeTests(TestCase):
+class ApplyLearningTests(TestCase):
     databases = DBS
 
     def setUp(self):
         self.user = User.objects.create_user(username='leo', password='secret')
-        self.conv = Conversation.objects.create(user_id=self.user.id, username='leo')
-        memory.add_message(self.conv, 'user', 'We got a dog named Biscuit.')
-        memory.add_message(self.conv, 'assistant', 'Congrats on Biscuit!')
+        self.conv = Conversation.objects.create(
+            user_id=self.user.id, username='leo', mode='learning')
+        memory.add_message(self.conv, 'assistant', 'Do you have any pets?')
+        memory.add_message(self.conv, 'user', 'A dog named Biscuit.')
         self.url = reverse('ai_lab_chatbot:learn', args=[self.conv.id])
         self.client.login(username='leo', password='secret')
 
+    def _reply(self, mock_complete, add=(), update=(), retire=()):
+        mock_complete.return_value = json.dumps({
+            'add': list(add), 'update': list(update), 'retire': list(retire),
+        })
+
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
-    def test_creates_learned_facts_attributed_to_user(self, mock_complete):
-        mock_complete.return_value = (
-            '["The household has a dog named Biscuit.", "Leo has a garden."]'
-        )
+    def test_adds_learned_facts_attributed_to_user(self, mock_complete):
+        self._reply(mock_complete, add=[
+            "Leo's dog is named Biscuit.", 'Leo has a garden.'])
         resp = self.client.post(self.url)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.json()['learned']), 2)
+        self.assertEqual(len(resp.json()['added']), 2)
 
         facts = HouseholdFact.objects.filter(source='learned')
         self.assertEqual(facts.count(), 2)
         for fact in facts:
+            self.assertTrue(fact.is_current)
             self.assertEqual(fact.source_user_id, self.user.id)
             self.assertEqual(fact.source_username, 'leo')
 
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
-    def test_exact_text_duplicate_is_skipped(self, mock_complete):
-        HouseholdFact.objects.create(
-            content='The household has a dog named Biscuit.', source='admin'
-        )
-        # Same fact, different casing/whitespace/trailing period.
-        mock_complete.return_value = '["  the household has a DOG named   Biscuit  "]'
-        resp = self.client.post(self.url)
-        self.assertEqual(resp.json()['learned'], [])
-        self.assertEqual(
-            HouseholdFact.objects.filter(
-                content__icontains='Biscuit').count(),
-            1,
-        )
+    def test_prompt_uses_question_as_context_and_lists_current_facts(
+            self, mock_complete):
+        HouseholdFact.objects.create(content='The household is in Raleigh.')
+        HouseholdFact.objects.create(content='Old fact.', is_current=False)
+        self._reply(mock_complete)
+        self.client.post(self.url)
+        body = mock_complete.call_args.args[0][-1]['content']
+        self.assertIn('Mycroft asked: Do you have any pets?', body)
+        self.assertIn('answered: A dog named Biscuit.', body)
+        self.assertIn('The household is in Raleigh.', body)
+        self.assertNotIn('Old fact.', body)
 
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
-    def test_within_batch_duplicate_is_skipped(self, mock_complete):
-        mock_complete.return_value = (
-            '["Leo has a garden.", "leo has a garden"]'
-        )
+    def test_duplicates_skipped(self, mock_complete):
+        HouseholdFact.objects.create(content="Leo's dog is named Biscuit.")
+        # Same fact (casing/whitespace/period) plus a within-batch repeat.
+        self._reply(mock_complete, add=[
+            "  leo's DOG is named   Biscuit  ",
+            'Leo has a garden.', 'leo has a garden'])
         resp = self.client.post(self.url)
-        self.assertEqual(len(resp.json()['learned']), 1)
+        self.assertEqual(resp.json()['added'], ['Leo has a garden.'])
+        self.assertEqual(HouseholdFact.objects.count(), 2)
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_update_supersedes_old_fact(self, mock_complete):
+        old = HouseholdFact.objects.create(
+            content='The household lives at 9 Elm Rd.')
+        self._reply(mock_complete, update=[
+            {'id': old.id, 'content': 'The household lives at 12 Oak St.'}])
+        resp = self.client.post(self.url)
+
+        self.assertEqual(resp.json()['updated'], [{
+            'from': 'The household lives at 9 Elm Rd.',
+            'to': 'The household lives at 12 Oak St.',
+        }])
+        old.refresh_from_db()
+        new = HouseholdFact.objects.get(content__contains='12 Oak St')
+        self.assertFalse(old.is_current)
+        self.assertEqual(old.superseded_by, new)
+        self.assertIsNotNone(old.superseded_at)
+        self.assertTrue(new.is_current)
+        self.assertEqual(new.source, 'learned')
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_update_with_same_text_is_noop(self, mock_complete):
+        old = HouseholdFact.objects.create(content='Leo has a garden.')
+        self._reply(mock_complete, update=[
+            {'id': old.id, 'content': 'leo has a garden'}])
+        resp = self.client.post(self.url)
+        self.assertEqual(resp.json()['updated'], [])
+        old.refresh_from_db()
+        self.assertTrue(old.is_current)
         self.assertEqual(HouseholdFact.objects.count(), 1)
 
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
-    def test_empty_extraction_creates_nothing(self, mock_complete):
-        mock_complete.return_value = '[]'
+    def test_retire_marks_not_current(self, mock_complete):
+        fact = HouseholdFact.objects.create(content='Leo has a cat named Tom.')
+        self._reply(mock_complete, retire=[fact.id])
         resp = self.client.post(self.url)
-        self.assertEqual(resp.json()['learned'], [])
-        self.assertEqual(HouseholdFact.objects.count(), 0)
+        self.assertEqual(resp.json()['retired'], ['Leo has a cat named Tom.'])
+        fact.refresh_from_db()
+        self.assertFalse(fact.is_current)
+        self.assertIsNone(fact.superseded_by)
+        self.assertIsNotNone(fact.superseded_at)
 
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
-    def test_garbage_reply_creates_nothing(self, mock_complete):
-        mock_complete.return_value = 'I did not find any durable facts.'
+    def test_unknown_and_superseded_ids_ignored(self, mock_complete):
+        gone = HouseholdFact.objects.create(content='Old.', is_current=False)
+        self._reply(
+            mock_complete,
+            update=[{'id': 9999, 'content': 'Invented.'},
+                    {'id': gone.id, 'content': 'Revived.'}],
+            retire=[9999, gone.id],
+        )
         resp = self.client.post(self.url)
-        self.assertEqual(resp.json()['learned'], [])
+        self.assertEqual(
+            resp.json(), {'added': [], 'updated': [], 'retired': []})
+        self.assertEqual(HouseholdFact.objects.count(), 1)
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_garbage_reply_changes_nothing(self, mock_complete):
+        mock_complete.return_value = 'I did not find any facts.'
+        resp = self.client.post(self.url)
+        self.assertEqual(
+            resp.json(), {'added': [], 'updated': [], 'retired': []})
         self.assertEqual(HouseholdFact.objects.count(), 0)
 
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat',
@@ -995,26 +1088,87 @@ class LearnFromExchangeTests(TestCase):
         with self.assertLogs('ai_lab_chatbot.mycroft.memory', level='ERROR'):
             resp = self.client.post(self.url)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()['learned'], [])
+        self.assertEqual(
+            resp.json(), {'added': [], 'updated': [], 'retired': []})
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_chat_mode_conversation_never_learns(self, mock_complete):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        memory.add_message(conv, 'user', 'We got a dog named Biscuit.')
+        memory.add_message(conv, 'assistant', 'Congrats!')
+        resp = self.client.post(
+            reverse('ai_lab_chatbot:learn', args=[conv.id]))
+        self.assertEqual(
+            resp.json(), {'added': [], 'updated': [], 'retired': []})
+        mock_complete.assert_not_called()
         self.assertEqual(HouseholdFact.objects.count(), 0)
 
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
-    def test_missing_assistant_turn_is_noop(self, mock_complete):
-        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
-        memory.add_message(conv, 'user', 'Hi there.')
+    def test_no_user_turn_is_noop(self, mock_complete):
+        conv = Conversation.objects.create(
+            user_id=self.user.id, username='leo', mode='learning')
+        memory.add_message(conv, 'assistant', 'Who lives here?')
         resp = self.client.post(
             reverse('ai_lab_chatbot:learn', args=[conv.id]))
-        self.assertEqual(resp.json()['learned'], [])
+        self.assertEqual(resp.json()['added'], [])
         mock_complete.assert_not_called()
 
     @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
     def test_other_users_conversation_is_404(self, mock_complete):
         other = User.objects.create_user(username='sam', password='x')
-        conv = Conversation.objects.create(user_id=other.id, username='sam')
+        conv = Conversation.objects.create(
+            user_id=other.id, username='sam', mode='learning')
         resp = self.client.post(
             reverse('ai_lab_chatbot:learn', args=[conv.id]))
         self.assertEqual(resp.status_code, 404)
         mock_complete.assert_not_called()
+
+
+class StartLearningViewTests(TestCase):
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='secret')
+        self.client.login(username='leo', password='secret')
+        self.url = reverse('ai_lab_chatbot:learn_new')
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat')
+    def test_creates_learning_conversation_with_opener(self, mock_complete):
+        mock_complete.return_value = 'Hi! Who lives in your household?'
+        resp = self.client.post(self.url)
+
+        conv = Conversation.objects.get(user_id=self.user.id)
+        self.assertRedirects(
+            resp, reverse('ai_lab_chatbot:conversation', args=[conv.id]),
+            fetch_redirect_response=False)
+        self.assertEqual(conv.mode, 'learning')
+        self.assertEqual(conv.title, memory.LEARNING_TITLE)
+        msgs = list(conv.messages.all())
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].role, 'assistant')
+        self.assertEqual(msgs[0].content, 'Hi! Who lives in your household?')
+        # The opener is generated with the learning-mode system prompt.
+        system = mock_complete.call_args.args[0][0]['content']
+        self.assertIn('This is a learning conversation', system)
+
+    @patch('ai_lab_chatbot.mycroft.memory.complete_chat',
+           side_effect=RuntimeError('ollama down'))
+    def test_falls_back_to_canned_opener(self, mock_complete):
+        with self.assertLogs('ai_lab_chatbot.mycroft.memory', level='ERROR'):
+            self.client.post(self.url)
+        conv = Conversation.objects.get(user_id=self.user.id)
+        self.assertEqual(
+            conv.messages.get().content, memory.FALLBACK_OPENER)
+
+    def test_requires_post(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 405)
+
+    def test_requires_login(self):
+        self.client.logout()
+        resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(Conversation.objects.exists())
 
 
 class DeleteViewTests(TestCase):

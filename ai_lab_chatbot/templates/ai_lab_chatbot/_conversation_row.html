@@ -17,7 +17,9 @@ the row in updated_at-descending order when its favorite state is toggled.
     <a href="{% url 'ai_lab_chatbot:conversation' c.id %}"
        class="conv-link flex-grow-1 text-decoration-none text-body">
         <div class="fw-semibold conv-title-text">{{ c.display_title }}</div>
-        <div class="small text-muted">{{ c.updated_at|timesince }} ago</div>
+        <div class="small text-muted">
+            {% if c.mode == 'learning' %}<span class="badge text-bg-info me-1">Learning</span>{% endif %}{{ c.updated_at|timesince }} ago
+        </div>
     </a>
     {% comment %}
        Inline rename editor, revealed by the pencil. Prefilled with the stored

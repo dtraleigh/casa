@@ -555,6 +555,9 @@ What shipped differs from the sketch above in a few deliberate places.
 
 ## Phase 3b: Auto-learning of HouseholdFacts
 
+> **Superseded by [Phase 3c](#phase-3c-guided-learning-teach-mycroft) (2026-10-18)** —
+> passive extraction produced mostly noise and has been removed.
+>
 > **Status: ✅ Shipped — 2026-08-21.** After each exchange the browser fires an
 > off-band `/learn/` endpoint that asks Mycroft to extract durable household facts
 > and writes new ones as `source='learned'` HouseholdFacts. Covered by unit +
@@ -626,6 +629,52 @@ What shipped differs from the sketch above in a few deliberate places.
 
 - **No management command.** Extraction is purely event-driven off the endpoint;
   the batch-command option was not built.
+
+---
+
+## Phase 3c: Guided learning ("Teach Mycroft")
+
+> **Status: ✅ Code shipped — 2026-10-18; live validation open.** Replaces Phase 3b's
+> passive per-exchange auto-learning, which in practice harvested noise: general-
+> knowledge statements mined from Mycroft's own answers rather than anything about
+> the household.
+
+**Goal:** learning is deliberate. Household facts are only written in a dedicated
+learning conversation where Mycroft interviews the user. Ordinary chats read facts
+but never write them.
+
+**How it works:**
+
+- **Teach button → learning conversation.** `POST /mycroft/learn/new/` creates a
+  `Conversation(mode='learning', title='Teaching Mycroft')` and seeds it with an
+  opening question from Mycroft (generated via `complete_chat`; a canned opener if
+  that fails), then opens it. Learning chats show a "Learning" badge in the chat
+  header and on History.
+- **Interviewer prompt.** `build_system_prompt(..., mode='learning')` appends
+  `LEARNING_INSTRUCTIONS`: ask one short question at a time about what isn't already
+  in the (listed) household facts, follow the user's lead, never invent facts.
+  Later learning chats therefore pick up where earlier ones left off.
+- **Answer → fact operations.** After each completed reply in a learning chat, the
+  browser calls the existing `/conversation/<uuid>/learn/` endpoint. It sends the
+  current facts with ids, Mycroft's question (context only), and the user's answer
+  (the only source of facts) to `build_fact_update_prompt`. The model returns
+  `{"add": [...], "update": [{"id", "content"}], "retire": [ids]}`.
+  `memory.apply_learning` applies those atomically, and the chat shows each change
+  as a green notice ("Saved: …", "Updated: … → …").
+- **Supersession, not overwrite.** An `update` creates the new fact and marks the old
+  one `is_current=False` with `superseded_by` → new and a timestamp. A `retire`
+  (no longer true, no replacement) just marks it not current. Only current facts
+  reach any prompt, and history stays browsable in admin (`is_current` filter).
+- **Server-enforced scope.** `apply_learning` is a no-op unless
+  `conversation.mode == 'learning'`, so a stale client can't make a normal chat learn.
+
+**Schema (migration `0009`):** `Conversation.mode` (`chat`|`learning`, default
+`chat`); `HouseholdFact.is_current`, `superseded_by` (self-FK, SET_NULL),
+`superseded_at`.
+
+**Not done / follow-ups:** no confirm-before-save (facts are saved immediately and
+shown; fix mistakes in admin). Exact-text dedup only. Pre-3c junk `learned` facts
+were left in place; prune them in admin via the `source` filter.
 
 ---
 
@@ -708,34 +757,35 @@ Both stay resident with `OLLAMA_KEEP_ALIVE=24h` once Phase 3 ships (so retrieval
 ## Open architectural questions (later phases)
 
 - **Static vs. dynamic tool registration** — hard-coded in Phase 4, tool registry pattern later if needed.
-- **Auto-learning extraction quality** — Phase 3b shipped; tune the extraction prompt / dedup during live validation. Embedding-based dedup + contradiction detection remain a follow-up.
+- **Learning extraction quality** — Phase 3c (guided learning) replaced 3b; tune `build_fact_update_prompt` / `LEARNING_INSTRUCTIONS` during live validation. Embedding-based dedup remains a follow-up.
 - **Voice hardware direction** — Phase 5; depends on what we learn in Phases 1-4.
 
 ## Current status — pick up here
 
-_Last updated 2026-08-21._
+_Last updated 2026-10-18._
 
 | Phase | Status |
 |-------|--------|
 | 1 — Basic chat + personality | ✅ Complete (2026-07-19) |
 | 2 — Persistent conversations | ✅ Complete (2026-07-26) |
 | 3 — Semantic memory + knowledge base (core) | ✅ Code shipped (2026-08-01); **live validation still open** |
-| 3b — Auto-learning of HouseholdFacts | ✅ Code shipped (2026-08-21), 14 tests pass; **live validation still open** |
+| 3b — Auto-learning of HouseholdFacts | ⛔ Superseded by 3c (passive extraction removed) |
+| 3c — Guided learning ("Teach Mycroft") | ✅ Code shipped (2026-10-18), 39 targeted tests pass on server; **live validation open** |
 | 4 — Tool calling (weather) | 🔲 Not started |
 | 5 — Voice I/O | 🔲 Not started, unscoped |
 
 **Next actions, in order:**
 
-1. **Live-validate Phase 3b** (code is in, tests green). In a real chat say
-   "we got a dog named Biscuit" → confirm a `source='learned'` HouseholdFact
-   appears in admin and is referenced on a later turn; a transient remark
-   ("I'm tired today") should create nothing. Tune the extraction prompt /
-   `_MAX_LEARNED_PER_EXCHANGE` if it over- or under-harvests.
+1. **Migrate + validate Phase 3c on the server.** `migrate --database=ai_lab`, run
+   `ParseFactOpsTests ApplyLearningTests StartLearningViewTests BuildSystemPromptTests`
+   with `--keepdb`. Live: click **Teach**, answer a few questions and see "Saved:"
+   notices; in a second Teach chat say "we moved to 12 Oak St" and confirm the
+   old address fact is `is_current=False` and points at the new one; confirm a
+   normal chat writes nothing. Prune pre-3c junk `learned` facts in admin.
 2. **Live-validate + tune Phase 3 core** — run the DoD smoke tests and set the
    retrieval knobs (`MYCROFT_RETRIEVAL_MAX_DISTANCE`, `_MESSAGES`, `_KNOWLEDGE`),
    which were picked blind. See the Phase 3 "Definition of done (validate live)".
 3. **Build Phase 4 — tool calling (weather)** — the next clean feature build;
    the `mycroft/tools.py` seam and `role='tool'` message plumbing are ready.
 
-Uncommitted as of this update: Phase 3b (this build) plus the earlier
-HouseholdFact admin help-text change and migration `0007`.
+Uncommitted as of this update: Phase 3c (migration `0009`).

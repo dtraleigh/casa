@@ -1,7 +1,7 @@
 """Assembles the system prompt sent to Ollama for each request.
 
 The final prompt is never stored — it's built fresh every request from the
-active Personality, all HouseholdFacts, and the requesting user's UserContext,
+active Personality, all current HouseholdFacts, and the requesting user's UserContext,
 plus tool descriptions (empty in Phase 1) and hardcoded guardrails.
 """
 from ai_lab_chatbot.models import Personality, HouseholdFact, UserContext
@@ -18,6 +18,24 @@ STANDARD_GUARDRAILS = (
     "tasks."
 )
 
+# Appended in "Teach Mycroft" learning conversations. Lives in code for the same
+# reason as the guardrails. The user's answers are mined into HouseholdFacts
+# off-band (memory.apply_learning); this only shapes the interview itself.
+LEARNING_INSTRUCTIONS = (
+    "This is a learning conversation: your job right now is to get to know the "
+    "household so you can help better later. The facts you already know are "
+    "listed under \"About the household\" — don't ask about those again unless "
+    "checking whether something has changed. Ask ONE short, friendly question "
+    "at a time about something you don't know yet. Good topics: who lives here "
+    "and how they're related, pets, the home and address, vehicles, work and "
+    "school schedules, routines, likes and dislikes, important dates, and "
+    "service providers (doctors, vets, utilities). Briefly acknowledge each "
+    "answer before moving on. If the user says something has changed, confirm "
+    "the change in a sentence. If they want to tell you about something "
+    "specific, follow their lead. Never invent or assume facts, and if they "
+    "don't want to answer, move on."
+)
+
 # Minimal identity used only if no Personality is marked active, so a
 # misconfigured admin state degrades instead of producing an empty prompt.
 _FALLBACK_IDENTITY = (
@@ -25,15 +43,17 @@ _FALLBACK_IDENTITY = (
 )
 
 
-def build_system_prompt(user, knowledge=None, past=None) -> str:
+def build_system_prompt(user, knowledge=None, past=None, mode='chat') -> str:
     """Assemble the system prompt for `user`. Empty sections are omitted.
 
     `knowledge` and `past` are optional semantically-retrieved context (Phase 3):
     Knowledge rows and past Message rows respectively. They ride in the system
-    prompt like personality/facts — assembled fresh, never stored.
+    prompt like personality/facts — assembled fresh, never stored. `mode` is the
+    conversation's mode; 'learning' adds the interviewer instructions.
     """
     personality = Personality.get_active()
-    facts = HouseholdFact.objects.all()  # small table, load all
+    # Small table, load all current facts (superseded ones are history only).
+    facts = HouseholdFact.objects.filter(is_current=True)
     context = UserContext.for_user(user)
     tool_descriptions = describe_registered_tools()
 
@@ -70,6 +90,9 @@ def build_system_prompt(user, knowledge=None, past=None) -> str:
     if tool_descriptions.strip():
         sections.append(tool_descriptions.strip())
 
+    if mode == 'learning':
+        sections.append(LEARNING_INSTRUCTIONS)
+
     sections.append(STANDARD_GUARDRAILS)
 
     return "\n\n".join(sections)
@@ -96,34 +119,52 @@ def build_title_prompt(first_user, first_assistant):
     ]
 
 
-def build_extraction_prompt(user_text, assistant_text, username):
-    """Messages asking Mycroft to mine durable household facts from one exchange.
+def build_fact_update_prompt(question, answer, current_facts, username):
+    """Messages asking Mycroft to turn one learning-chat answer into fact edits.
 
-    Returns a small message list for a non-streaming completion (Phase 3b
-    auto-learning). Kept terse and self-contained — no personality — so the model
-    stays focused on extraction, not conversation. The reply is expected to be a
-    JSON array of fact strings (empty when nothing qualifies); `memory.py` parses
-    it defensively.
+    `question` is Mycroft's preceding message (context only, so a bare answer
+    like "Biscuit" can be resolved); `answer` is the user's reply and the ONLY
+    source of facts. `current_facts` are the current HouseholdFacts, shown with
+    ids so the model can update or retire them. The reply is expected to be a
+    JSON object {"add": [...], "update": [{"id", "content"}], "retire": [...]};
+    `memory.py` parses it defensively.
     """
-    exchange = f"User: {user_text}\n\nAssistant: {assistant_text}"
     speaker = username or "the user"
+    fact_lines = "\n".join(
+        f"[{f.id}] {f.content.strip()}" for f in current_facts
+    ) or "(none yet)"
+    body = (
+        f"Known facts:\n{fact_lines}\n\n"
+        f"Mycroft asked: {question or '(nothing - the user volunteered this)'}\n\n"
+        f"{speaker} answered: {answer}"
+    )
     return [
         {
             'role': 'system',
             'content': (
-                "You extract durable facts about a household and its members from "
-                "a single chat exchange, to be remembered long-term. Include only "
-                "clear, lasting facts worth keeping: names, relationships, pets, "
-                "vehicles, addresses, jobs, and ongoing preferences or routines. "
-                "Exclude anything transient (moods, what someone is doing right "
-                "now, today's weather), questions, speculation, and anything that "
-                "sounds like it was shared in confidence. Be conservative — when "
-                "in doubt, leave it out. Write each fact as one short standalone "
-                f"sentence, naming the person where known (the speaker is "
-                f"{speaker}), e.g. \"Leo's dog is named Biscuit.\" Reply with ONLY "
-                "a JSON array of fact strings, and [] when nothing qualifies. No "
-                "prose, no code fences, no commentary."
+                "You maintain a list of durable facts about a household. Given "
+                "the known facts and the user's latest answer, decide what to "
+                "change. Only the user's answer is a source of facts — Mycroft's "
+                "question is context, never a fact. Ignore general knowledge, "
+                "remarks about the conversation itself, and anything transient "
+                "(moods, what someone is doing right now).\n\n"
+                "- add: new facts the answer states that are not already known.\n"
+                "- update: a known fact the answer says has changed; give its id "
+                "and the full new sentence.\n"
+                "- retire: ids of known facts the answer says are no longer true "
+                "and have no replacement.\n\n"
+                "Write each fact as one short standalone sentence naming the "
+                f"person (the speaker is {speaker}), e.g. \"{speaker}'s dog is "
+                "named Biscuit.\"\n\n"
+                "Examples:\n"
+                'Answer "We moved to 12 Oak St" with known fact [4] "The '
+                'household lives at 9 Elm Rd." -> {"add": [], "update": '
+                '[{"id": 4, "content": "The household lives at 12 Oak St."}], '
+                '"retire": []}\n'
+                'Answer "Not sure, ask me later" -> {"add": [], "update": [], '
+                '"retire": []}\n\n'
+                "Reply with ONLY the JSON object — no prose, no code fences."
             ),
         },
-        {'role': 'user', 'content': exchange},
+        {'role': 'user', 'content': body},
     ]

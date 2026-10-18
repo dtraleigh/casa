@@ -2,19 +2,25 @@
 
 Keeps DB concerns out of the view: creating/fetching conversations (scoped to
 their owner), writing messages, and assembling the sliding-window history sent
-to Ollama. Phase 4 (tool messages), Phase 3 (embeddings, retrieval), and Phase 3b
-(auto-learning) hook in here rather than in the HTTP layer.
+to Ollama. Phase 4 (tool messages), Phase 3 (embeddings, retrieval), and Phase 3c
+(guided learning) hook in here rather than in the HTTP layer.
 """
 import json
 import logging
 import re
 
 from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
 from pgvector.django import CosineDistance
 
-from ai_lab_chatbot.models import Conversation, HouseholdFact, Knowledge, Message
+from ai_lab_chatbot.models import (
+    Conversation, HouseholdFact, Knowledge, Message, MycroftConfig,
+)
 from ai_lab_chatbot.mycroft.client import complete_chat, embed_text
-from ai_lab_chatbot.mycroft.prompts import build_extraction_prompt
+from ai_lab_chatbot.mycroft.prompts import (
+    build_fact_update_prompt, build_system_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +188,23 @@ def retrieve_memories(user, query_vec, *, exclude_conversation_id=None):
     return knowledge, messages
 
 
-# --- Auto-learning (Phase 3b) ----------------------------------------------
+# --- Guided learning (Phase 3c) -------------------------------------------
 
-# Cap on facts accepted from one exchange, so a runaway reply can't flood the
-# shared table.
+# Cap on each kind of change accepted from one answer, so a runaway reply can't
+# flood the shared table.
 _MAX_LEARNED_PER_EXCHANGE = 5
+
+LEARNING_TITLE = 'Teaching Mycroft'
+# Used when the opening question can't be generated (Ollama down, etc.).
+FALLBACK_OPENER = "Let's start with the basics — who lives in your household?"
+# Synthetic user turn that kicks off the interview. Never persisted.
+_OPENER_PROMPT = (
+    "Start the interview: greet me in one sentence and ask your first question."
+)
+
+
+def _empty_result():
+    return {'added': [], 'updated': [], 'retired': []}
 
 
 def _normalize_fact(text):
@@ -195,79 +213,176 @@ def _normalize_fact(text):
     return re.sub(r'\s+', ' ', text).strip().rstrip('.').lower()
 
 
-def _parse_fact_list(raw):
-    """Pull a list of fact strings out of the model's reply, defensively.
-
-    The extraction prompt asks for a bare JSON array, but models wander — they
-    wrap it in ```json fences or add a sentence of preamble. We slice from the
-    first '[' to the last ']' and parse that, keeping only non-empty strings and
-    capping the count. Any parse failure yields [] (learn nothing this turn)
-    rather than raising.
-    """
-    if not raw:
-        return []
-    start = raw.find('[')
-    end = raw.rfind(']')
-    if start == -1 or end <= start:
-        return []
+def _as_id(value):
+    """An int id from the model's output (it may quote it), else None."""
+    if isinstance(value, bool):
+        return None
     try:
-        items = json.loads(raw[start:end + 1])
-    except (ValueError, TypeError):
-        return []
-    if not isinstance(items, list):
-        return []
-    facts = []
-    for item in items:
-        if isinstance(item, str) and item.strip():
-            facts.append(item.strip())
-        if len(facts) >= _MAX_LEARNED_PER_EXCHANGE:
-            break
-    return facts
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def learn_from_exchange(conversation, user):
-    """Mine durable HouseholdFacts from a conversation's latest exchange.
+def _parse_fact_ops(raw):
+    """Pull {"add", "update", "retire"} out of the model's reply, defensively.
 
-    Best-effort and off the streaming path (called from its own endpoint): asks
-    Mycroft to extract durable facts from the last user+assistant turns, then
-    writes each new one as a `source='learned'` HouseholdFact attributed to
-    `user`. Exact-text duplicates of existing facts are skipped. Any failure
-    (Ollama down, unparseable reply, DB hiccup) is logged and swallowed —
-    auto-learning must never surface an error to the caller. Returns the list of
-    newly created fact strings (possibly empty).
+    The prompt asks for a bare JSON object, but models wander — code fences,
+    preamble. We slice from the first '{' to the last '}' and parse that,
+    keeping only well-typed entries and capping each list. Any parse failure
+    yields empty ops (change nothing this turn) rather than raising.
     """
+    ops = {'add': [], 'update': [], 'retire': []}
+    if not raw:
+        return ops
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start == -1 or end <= start:
+        return ops
+    try:
+        data = json.loads(raw[start:end + 1])
+    except (ValueError, TypeError):
+        return ops
+    if not isinstance(data, dict):
+        return ops
+
+    def as_list(key):
+        value = data.get(key)
+        return value if isinstance(value, list) else []
+
+    for item in as_list('add'):
+        if isinstance(item, str) and item.strip():
+            ops['add'].append(item.strip())
+    for item in as_list('update'):
+        if not isinstance(item, dict):
+            continue
+        fact_id = _as_id(item.get('id'))
+        content = item.get('content')
+        if fact_id is not None and isinstance(content, str) and content.strip():
+            ops['update'].append({'id': fact_id, 'content': content.strip()})
+    for item in as_list('retire'):
+        fact_id = _as_id(item)
+        if fact_id is not None:
+            ops['retire'].append(fact_id)
+
+    return {k: v[:_MAX_LEARNED_PER_EXCHANGE] for k, v in ops.items()}
+
+
+def start_learning_conversation(user):
+    """Create a "Teach Mycroft" conversation seeded with Mycroft's opening
+    question, so the interview starts with Mycroft asking. Generating the opener
+    is best-effort — on failure a canned question is used instead."""
+    model = MycroftConfig.default_model()
+    conversation = Conversation.objects.create(
+        user_id=user.id, username=user.username,
+        title=LEARNING_TITLE, model=model, mode='learning',
+    )
+    opener = ''
+    try:
+        opener = complete_chat(
+            [
+                {'role': 'system',
+                 'content': build_system_prompt(user, mode='learning')},
+                {'role': 'user', 'content': _OPENER_PROMPT},
+            ],
+            model=model,
+        )
+    except Exception:
+        logger.exception("Mycroft learning opener failed")
+    if opener:
+        add_message(conversation, 'assistant', opener, model=model)
+    else:
+        add_message(conversation, 'assistant', FALLBACK_OPENER)
+    return conversation
+
+
+def apply_learning(conversation, user):
+    """Turn the latest answer in a learning conversation into HouseholdFact
+    changes: new facts are added, changed facts are superseded by their
+    replacement, and facts no longer true are retired (kept for history, out of
+    prompts).
+
+    A no-op for ordinary chats — only learning conversations write facts. Only
+    the user's message is a source of facts; the assistant message before it
+    (the question) is context. Best-effort and off the streaming path: any
+    failure is logged and swallowed. Returns
+    {'added': [str], 'updated': [{'from', 'to'}], 'retired': [str]}.
+    """
+    result = _empty_result()
+    if conversation.mode != 'learning':
+        return result
     try:
         user_msg = conversation.messages.filter(role='user').last()
-        assistant_msg = conversation.messages.filter(role='assistant').last()
-        if not (user_msg and assistant_msg):
-            return []
+        if not user_msg:
+            return result
+        # The question being answered: the last assistant turn before it.
+        question_msg = (
+            conversation.messages
+            .filter(role='assistant', id__lt=user_msg.id)
+            .last()
+        )
 
+        # Small table — load all current facts.
+        current = {
+            f.id: f for f in HouseholdFact.objects.filter(is_current=True)
+        }
         raw = complete_chat(
-            build_extraction_prompt(
-                user_msg.content, assistant_msg.content, user.username
+            build_fact_update_prompt(
+                question_msg.content if question_msg else '',
+                user_msg.content,
+                list(current.values()),
+                user.username,
             ),
             model=conversation.model or None,
         )
-        candidates = _parse_fact_list(raw)
-        if not candidates:
-            return []
+        ops = _parse_fact_ops(raw)
 
-        # Small table — load all existing facts and dedup in Python.
-        seen = {_normalize_fact(f.content) for f in HouseholdFact.objects.all()}
-        created = []
-        for content in candidates:
-            key = _normalize_fact(content)
-            if key in seen:
-                continue
-            seen.add(key)
-            HouseholdFact.objects.create(
-                content=content,
-                source='learned',
-                source_user_id=user.id,
-                source_username=user.username,
-            )
-            created.append(content)
-        return created
+        attribution = {
+            'source': 'learned',
+            'source_user_id': user.id,
+            'source_username': user.username,
+        }
+        seen = {_normalize_fact(f.content) for f in current.values()}
+        now = timezone.now()
+
+        with transaction.atomic(using=HouseholdFact.objects.db):
+            for content in ops['add']:
+                key = _normalize_fact(content)
+                if key in seen:
+                    continue
+                seen.add(key)
+                HouseholdFact.objects.create(content=content, **attribution)
+                result['added'].append(content)
+
+            for op in ops['update']:
+                old = current.get(op['id'])
+                if old is None or not old.is_current:
+                    continue
+                if _normalize_fact(op['content']) == _normalize_fact(old.content):
+                    continue
+                new = HouseholdFact.objects.create(
+                    content=op['content'], **attribution
+                )
+                old.is_current = False
+                old.superseded_by = new
+                old.superseded_at = now
+                old.save(update_fields=[
+                    'is_current', 'superseded_by', 'superseded_at', 'updated_at',
+                ])
+                seen.add(_normalize_fact(op['content']))
+                result['updated'].append({'from': old.content, 'to': new.content})
+
+            for fact_id in ops['retire']:
+                old = current.get(fact_id)
+                if old is None or not old.is_current:
+                    continue
+                old.is_current = False
+                old.superseded_at = now
+                old.save(update_fields=[
+                    'is_current', 'superseded_at', 'updated_at',
+                ])
+                result['retired'].append(old.content)
+
+        return result
     except Exception:
-        logger.exception("Mycroft auto-learning failed")
-        return []
+        logger.exception("Mycroft learning failed")
+        return _empty_result()

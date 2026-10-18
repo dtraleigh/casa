@@ -18,13 +18,16 @@ class PersonalityAdmin(admin.ModelAdmin):
 
 @admin.register(HouseholdFact)
 class HouseholdFactAdmin(admin.ModelAdmin):
-    # source + source_username surface auto-learned facts (Phase 3b) at a glance:
-    # filter source='learned' to review what Mycroft picked up and prune as needed.
-    list_display = ('content_preview', 'source', 'source_username', 'updated_at')
-    list_filter = ('source',)
+    # source + source_username surface facts learned in "Teach Mycroft" chats
+    # (Phase 3c) at a glance; is_current separates live facts from superseded
+    # history (only current facts reach prompts).
+    list_display = (
+        'content_preview', 'is_current', 'source', 'source_username', 'updated_at',
+    )
+    list_filter = ('is_current', 'source')
     search_fields = ('content', 'source_username')
     date_hierarchy = 'created_at'
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('superseded_by', 'superseded_at', 'created_at', 'updated_at')
     fieldsets = (
         (None, {
             'description': (
@@ -32,9 +35,13 @@ class HouseholdFactAdmin(admin.ModelAdmin):
                 "Mycroft. Enter one clear, durable fact per row — for a "
                 "hand-added fact, fill in the content and leave the rest as-is."
             ),
-            'fields': ('content', 'source'),
+            'fields': ('content', 'source', 'is_current'),
         }),
-        ('Source attribution (set automatically by auto-learning)', {
+        ('History (set automatically when a learning chat changes a fact)', {
+            'classes': ('collapse',),
+            'fields': ('superseded_by', 'superseded_at'),
+        }),
+        ('Source attribution (set automatically by learning chats)', {
             'classes': ('collapse',),
             'description': "Leave blank when adding a fact by hand.",
             'fields': ('source_user_id', 'source_username'),
@@ -71,8 +78,8 @@ class MessageInline(admin.TabularInline):
 
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
-    list_display = ('display_title', 'username', 'user_id', 'model', 'is_favorite', 'updated_at')
-    list_filter = ('is_favorite', 'model')
+    list_display = ('display_title', 'username', 'user_id', 'mode', 'model', 'is_favorite', 'updated_at')
+    list_filter = ('mode', 'is_favorite', 'model')
     search_fields = ('title', 'username', 'messages__content')
     readonly_fields = ('id', 'user_id', 'username', 'created_at', 'updated_at')
     inlines = [MessageInline]
@@ -89,13 +96,66 @@ class MessageAdmin(admin.ModelAdmin):
         return obj.content[:80]
 
 
+class KnowledgeForm(forms.ModelForm):
+    """Admin-only field guidance — kept here rather than in model help_text so
+    wording tweaks don't need a migration."""
+
+    class Meta:
+        model = Knowledge
+        fields = ['topic', 'content']
+        help_texts = {
+            'topic': (
+                'A short name for what this entry is about, e.g. "Furnace", '
+                '"Wi-Fi network", "Biscuit\'s vet care". The topic is part of '
+                "what's matched against questions, so name it the way you'd "
+                "ask about it."
+            ),
+            'content': (
+                "The details Mycroft should have on hand when this topic comes "
+                "up — a sentence or a few paragraphs. Keep each entry to one "
+                "topic: several focused entries match better than one big one."
+            ),
+        }
+
+
 @admin.register(Knowledge)
 class KnowledgeAdmin(admin.ModelAdmin):
+    form = KnowledgeForm
     list_display = ('topic', 'content_preview', 'updated_at')
     search_fields = ('topic', 'content')
-    # Embedding is managed on save, not hand-edited.
-    exclude = ('embedding',)
+    # Embedding is managed on save, not hand-edited (the form omits it).
     readonly_fields = ('created_at', 'updated_at')
+    fieldsets = (
+        (None, {
+            'description': (
+                "<p><strong>Knowledge is Mycroft's reference library.</strong> "
+                "Unlike Household facts — which are all included in every "
+                "conversation — a Knowledge entry is only pulled in when it's "
+                "relevant to what's being asked. When you send a message, "
+                "Mycroft finds the entries closest in meaning to it (up to "
+                "3, and only if they're a close enough match) and adds them "
+                "to its context for that reply. Unrelated entries cost "
+                "nothing, so this can hold much more detail than Household "
+                "facts.</p>"
+                "<p><strong>Good for:</strong> detail you only need when the "
+                "topic comes up — appliance model numbers and filter sizes, "
+                "network setup, a pet's vet and medication schedule, "
+                "recycling rules, service company contacts, car maintenance "
+                "history.</p>"
+                "<p><strong>Rule of thumb:</strong> if Mycroft should "
+                "<em>always</em> know it (\"Leo's wife is Jennifer\"), make it "
+                "a Household fact. If it only matters when the subject comes "
+                "up, add it here.</p>"
+                "<p>Entries are indexed automatically when saved — just fill "
+                "in the topic and content.</p>"
+            ),
+            'fields': ('topic', 'content'),
+        }),
+        ('Timestamps', {
+            'classes': ('collapse',),
+            'fields': ('created_at', 'updated_at'),
+        }),
+    )
 
     @admin.display(description='Content')
     def content_preview(self, obj):

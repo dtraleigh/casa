@@ -9,6 +9,9 @@
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
             <div class="d-flex align-items-center gap-2 text-truncate" style="max-width: 50%;">
                 <span class="fw-bold text-truncate" id="conv-title">Mycroft</span>
+                {% if bootstrap.mode == 'learning' %}
+                <span class="badge text-bg-info" title="Answers here are saved as household facts">Learning</span>
+                {% endif %}
                 {# Revealed once the conversation is persisted (an id exists). #}
                 <button type="button" id="conv-edit"
                         class="btn btn-link btn-sm p-0 lh-1 text-white-50 d-none"
@@ -27,6 +30,11 @@
             <div class="d-flex align-items-center gap-2">
                 <a href="{% url 'ai_lab_chatbot:chat' %}" class="btn btn-sm btn-outline-light">New</a>
                 <a href="{% url 'ai_lab_chatbot:history' %}" class="btn btn-sm btn-outline-light">History</a>
+                <form method="post" action="{% url 'ai_lab_chatbot:learn_new' %}" class="m-0">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-sm btn-outline-info"
+                            title="Start a chat where Mycroft asks about your household and remembers the answers">Teach</button>
+                </form>
                 <label for="width-select" class="small text-white-50 mb-0">Width</label>
                 <select id="width-select" class="form-select form-select-sm w-auto">
                     <option value="narrow">Narrow</option>
@@ -240,9 +248,9 @@ document.addEventListener('DOMContentLoaded', function () {
             '<span class="text-muted">Thinking…</span>';
     }
 
-    function addNotice(text) {
+    function addNotice(text, className) {
         const notice = document.createElement('div');
-        notice.className = 'text-danger small text-center mb-3';
+        notice.className = (className || 'text-danger') + ' small text-center mb-3';
         notice.textContent = text;
         messagesEl.appendChild(notice);
         messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -515,13 +523,28 @@ document.addEventListener('DOMContentLoaded', function () {
         } catch (e) { /* leave the default title */ }
     }
 
-    // After each completed exchange, ask the server to mine durable household
-    // facts from it (Phase 3b auto-learning). Fire-and-forget and off the
-    // streaming path — a failure is harmless and invisible to the chat.
+    // Learning chats only (Phase 3c): after each completed exchange, ask the
+    // server to apply the answer to the household facts, then show what changed.
+    // Off the streaming path — a failure is harmless and invisible to the chat.
     function learnFromExchange() {
         fetch('/mycroft/conversation/' + conversationId + '/learn/', {
             method: 'POST', headers: { 'X-CSRFToken': csrftoken },
-        }).catch(function () { /* nothing to do — best-effort */ });
+        })
+            .then(function (resp) { return resp.ok ? resp.json() : null; })
+            .then(function (data) {
+                if (!data) return;
+                const cls = 'text-success';
+                (data.added || []).forEach(function (f) {
+                    addNotice('Saved: ' + f, cls);
+                });
+                (data.updated || []).forEach(function (u) {
+                    addNotice('Updated: ' + u.from + ' → ' + u.to, cls);
+                });
+                (data.retired || []).forEach(function (f) {
+                    addNotice('No longer current: ' + f, cls);
+                });
+            })
+            .catch(function () { /* nothing to do — best-effort */ });
     }
 
     form.addEventListener('submit', async function (e) {
@@ -654,9 +677,10 @@ document.addEventListener('DOMContentLoaded', function () {
         if (respIsNew && conversationId && assistantText) {
             generateTitle();
         }
-        // Mine facts from every completed exchange, not just the first. Guarded
-        // on `completed` so a truncated reply isn't mined.
-        if (conversationId && assistantText && completed) {
+        // Learning chats apply every completed exchange to the household facts.
+        // Guarded on `completed` so a truncated reply isn't mined; ordinary chats
+        // never learn (the server enforces this too).
+        if (boot.mode === 'learning' && conversationId && assistantText && completed) {
             learnFromExchange();
         }
 
