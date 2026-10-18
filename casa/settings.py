@@ -189,6 +189,11 @@ LOGGING = {
             'level': 'INFO',
             'propagate': True,
         },
+        # Drop bad-Host rejections from IP scanners; Django still returns 400.
+        'django.security.DisallowedHost': {
+            'handlers': [],
+            'propagate': False,
+        },
         'core.views': {
             'handlers': ['file'],
             'level': 'DEBUG',
