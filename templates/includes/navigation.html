@@ -18,13 +18,33 @@
                     <a class="nav-link {% if request.resolver_match.app_name == 'wemo' %}active{% endif %}"
                        href="{% url 'wemo:main' %}">Wemo</a>
                 </li>
-                <li class="nav-item">
-                    <a class="nav-link {% if request.resolver_match.app_name == 'ai_lab_chatbot' and request.resolver_match.url_name != 'history' %}active{% endif %}"
-                       href="{% url 'ai_lab_chatbot:chat' %}">Mycroft</a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link {% if request.resolver_match.url_name == 'history' %}active{% endif %}"
-                       href="{% url 'ai_lab_chatbot:history' %}">History</a>
+                <li class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle {% if request.resolver_match.app_name == 'ai_lab_chatbot' %}active{% endif %}"
+                       href="#" role="button" data-bs-toggle="dropdown"
+                       aria-expanded="false">Mycroft</a>
+                    <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+                        <li>
+                            <a class="dropdown-item {% if request.resolver_match.app_name == 'ai_lab_chatbot' and request.resolver_match.url_name != 'history' %}active{% endif %}"
+                               href="{% url 'ai_lab_chatbot:chat' %}">
+                                <i class="bi bi-chat-dots me-2" aria-hidden="true"></i>Chat
+                            </a>
+                        </li>
+                        <li>
+                            {# Teach starts a conversation server-side, so it's a POST. #}
+                            <form method="post" action="{% url 'ai_lab_chatbot:learn_new' %}" class="m-0">
+                                {% csrf_token %}
+                                <button type="submit" class="dropdown-item">
+                                    <i class="bi bi-mortarboard me-2" aria-hidden="true"></i>Teach Mycroft
+                                </button>
+                            </form>
+                        </li>
+                        <li>
+                            <a class="dropdown-item {% if request.resolver_match.url_name == 'history' %}active{% endif %}"
+                               href="{% url 'ai_lab_chatbot:history' %}">
+                                <i class="bi bi-clock-history me-2" aria-hidden="true"></i>History
+                            </a>
+                        </li>
+                    </ul>
                 </li>
                 <li class="nav-item">
                     <a class="nav-link" href="{% url 'logout' %}">Logout</a>

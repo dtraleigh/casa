@@ -2,12 +2,17 @@
 {% block title %}Mycroft{% endblock %}
 
 {% block content %}
+<style>
+    @media (pointer: coarse) {
+        .keyboard-hint { display: none; }
+    }
+</style>
 {% csrf_token %}
 {{ bootstrap|json_script:"mycroft-bootstrap" }}
 <div id="chat-wrap" class="container-fluid px-3 px-lg-4 py-3 d-flex flex-column">
     <div class="card shadow-sm flex-grow-1 d-flex flex-column overflow-hidden">
-        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
-            <div class="d-flex align-items-center gap-2 text-truncate" style="max-width: 50%;">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center gap-2">
+            <div class="d-flex align-items-center gap-2 text-truncate flex-grow-1" style="min-width: 0;">
                 <span class="fw-bold text-truncate" id="conv-title">Mycroft</span>
                 {% if bootstrap.mode == 'learning' %}
                 <span class="badge text-bg-info" title="Answers here are saved as household facts">Learning</span>
@@ -18,36 +23,68 @@
                         aria-label="Rename conversation" title="Rename">
                     <i class="bi bi-pencil"></i>
                 </button>
-                <div id="conv-rename" class="input-group input-group-sm d-none">
-                    <input type="text" id="conv-rename-input" class="form-control"
-                           maxlength="200" placeholder="Conversation name"
-                           aria-label="Conversation name">
-                    <button type="button" id="conv-rename-save" class="btn btn-light">Save</button>
-                    <button type="button" id="conv-rename-cancel"
-                            class="btn btn-outline-light">Cancel</button>
-                </div>
             </div>
-            <div class="d-flex align-items-center gap-2">
-                <a href="{% url 'ai_lab_chatbot:chat' %}" class="btn btn-sm btn-outline-light">New</a>
-                <a href="{% url 'ai_lab_chatbot:history' %}" class="btn btn-sm btn-outline-light">History</a>
-                <form method="post" action="{% url 'ai_lab_chatbot:learn_new' %}" class="m-0">
+            {# Icon-only actions keep the header on one row at phone width. #}
+            <div class="d-flex align-items-center gap-1 flex-shrink-0">
+                <a href="{% url 'ai_lab_chatbot:chat' %}" class="btn btn-sm btn-outline-light"
+                   aria-label="New conversation" title="New conversation">
+                    <i class="bi bi-plus-lg" aria-hidden="true"></i>
+                </a>
+                <form method="post" action="{% url 'ai_lab_chatbot:learn_new' %}" class="m-0"
+                      id="teach-form">
                     {% csrf_token %}
                     <button type="submit" class="btn btn-sm btn-outline-info"
-                            title="Start a chat where Mycroft asks about your household and remembers the answers">Teach</button>
+                            aria-label="Teach Mycroft"
+                            title="Teach Mycroft: a chat where Mycroft asks about your household and remembers the answers">
+                        <i class="bi bi-mortarboard" aria-hidden="true"></i>
+                    </button>
                 </form>
-                <label for="width-select" class="small text-white-50 mb-0">Width</label>
-                <select id="width-select" class="form-select form-select-sm w-auto">
-                    <option value="narrow">Narrow</option>
-                    <option value="medium">Medium</option>
-                    <option value="wide">Wide</option>
-                    <option value="full">Full</option>
-                </select>
+                <div class="dropdown">
+                    {# auto-close outside: picking from a select mustn't close the menu. #}
+                    <button type="button" class="btn btn-sm btn-outline-light"
+                            data-bs-toggle="dropdown" data-bs-auto-close="outside"
+                            aria-expanded="false" aria-label="Chat settings" title="Settings">
+                        <i class="bi bi-three-dots-vertical" aria-hidden="true"></i>
+                    </button>
+                    <div class="dropdown-menu dropdown-menu-end p-3" style="min-width: 15rem;">
+                        <label for="model-select" class="form-label small text-muted mb-1">Model</label>
+                        <select id="model-select" class="form-select form-select-sm"
+                                aria-label="Chat model"></select>
+                        {# Width only matters on screens wider than the chat. #}
+                        <div class="d-none d-md-block mt-3">
+                            <label for="width-select" class="form-label small text-muted mb-1">Width</label>
+                            <select id="width-select" class="form-select form-select-sm">
+                                <option value="narrow">Narrow</option>
+                                <option value="medium">Medium</option>
+                                <option value="wide">Wide</option>
+                                <option value="full">Full</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
         <div id="messages" class="card-body overflow-auto flex-grow-1">
-            <div class="text-muted small text-center my-auto">
-                Say something to start. Conversations are saved — find past
-                ones under History.
+            {# Empty state; cleared on the first send. #}
+            <div class="text-center text-muted my-4">
+                <div class="small mb-3">Ask anything, or try one of these:</div>
+                <div class="d-flex flex-wrap justify-content-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill starter"
+                            data-prompt="What's the weather this week?">
+                        <i class="bi bi-cloud-sun me-1" aria-hidden="true"></i>What's the weather this week?
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill starter"
+                            data-prompt="Do I need a jacket today?">
+                        <i class="bi bi-umbrella me-1" aria-hidden="true"></i>Do I need a jacket today?
+                    </button>
+                    <button type="submit" form="teach-form"
+                            class="btn btn-sm btn-outline-info rounded-pill">
+                        <i class="bi bi-mortarboard me-1" aria-hidden="true"></i>Teach Mycroft about us
+                    </button>
+                </div>
+                <div class="small mt-3">
+                    Past conversations are under <strong>Mycroft → History</strong> in the menu.
+                </div>
             </div>
         </div>
         <div class="card-footer">
@@ -60,19 +97,45 @@
                     Send
                 </button>
             </form>
-            <div class="d-flex justify-content-between align-items-center mt-1 gap-2 flex-wrap">
-                <div class="form-text small mb-0">
-                    Enter to send · Shift+Enter for a new line
-                </div>
-                <div class="d-flex align-items-center gap-2">
-                    <label for="model-select" class="form-text small text-muted mb-0">Model</label>
-                    <select id="model-select" class="form-select form-select-sm w-auto"
-                            aria-label="Chat model"></select>
-                </div>
+            {# Keyboard advice; meaningless on a touch screen. #}
+            <div class="form-text small mt-1 mb-0 keyboard-hint">
+                Enter to send · Shift+Enter for a new line
             </div>
             <div id="context-footer" class="form-text small text-muted mt-1"
                  data-num-ctx="{{ mycroft_num_ctx }}"></div>
         </div>
+    </div>
+</div>
+
+{% comment %}
+Rename dialog. A modal rather than an inline editor so the field gets the
+full width on a phone instead of squeezing into the header.
+{% endcomment %}
+<div class="modal fade" id="rename-modal" tabindex="-1"
+     aria-labelledby="rename-modal-label" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        {# A real form, so Enter (or the phone keyboard's Go key) saves. #}
+        <form class="modal-content" id="rename-form">
+            <div class="modal-header">
+                <h1 class="modal-title fs-5" id="rename-modal-label">Rename conversation</h1>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                        aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <input type="text" id="conv-rename-input" class="form-control"
+                       maxlength="200" placeholder="Conversation name"
+                       aria-label="Conversation name" autocomplete="off">
+                <div class="form-text">Leave blank to name it automatically.</div>
+                <div id="rename-error" class="text-danger small mt-2 d-none">
+                    Couldn't save the name. Please try again.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary"
+                        data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" id="conv-rename-save" class="btn btn-primary">Save</button>
+            </div>
+        </form>
     </div>
 </div>
 
@@ -85,8 +148,10 @@ document.addEventListener('DOMContentLoaded', function () {
     const messagesEl = document.getElementById('messages');
     const titleEl = document.getElementById('conv-title');
     const editBtn = document.getElementById('conv-edit');
-    const renameBox = document.getElementById('conv-rename');
+    const renameModalEl = document.getElementById('rename-modal');
+    const renameForm = document.getElementById('rename-form');
     const renameInput = document.getElementById('conv-rename-input');
+    const renameError = document.getElementById('rename-error');
 
     // Server owns history now. We track only the current conversation id (null
     // until the first send persists one) and whether the placeholder is showing.
@@ -124,20 +189,18 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     showEditIfPersisted();
 
+    // The pencil opens the rename dialog, prefilled with the stored title.
+    // Focus waits for 'shown' because the fade-in blocks focusing earlier.
+    const renameModal = bootstrap.Modal.getOrCreateInstance(renameModalEl);
     function enterTitleEdit() {
         renameInput.value = currentTitle;
-        titleEl.classList.add('d-none');
-        editBtn.classList.add('d-none');
-        renameBox.classList.remove('d-none');
+        renameError.classList.add('d-none');
+        renameModal.show();
+    }
+    renameModalEl.addEventListener('shown.bs.modal', function () {
         renameInput.focus();
         renameInput.select();
-    }
-
-    function exitTitleEdit() {
-        renameBox.classList.add('d-none');
-        titleEl.classList.remove('d-none');
-        showEditIfPersisted();
-    }
+    });
 
     function saveTitleEdit() {
         if (!conversationId) return;
@@ -156,20 +219,21 @@ document.addEventListener('DOMContentLoaded', function () {
         }).then(function (data) {
             currentTitle = data.title;
             titleEl.textContent = data.display_title;
-            exitTitleEdit();
+            renameModal.hide();
         }).catch(function () {
-            /* keep the editor open so the edit isn't lost */
+            // Keep the dialog open so the edit isn't lost.
+            renameError.classList.remove('d-none');
         }).finally(function () {
             saveBtn.disabled = false;
         });
     }
 
+    // Save button and Enter both submit the form; Cancel, the X, Escape and a
+    // tap outside are all handled by the modal itself.
     editBtn.addEventListener('click', enterTitleEdit);
-    document.getElementById('conv-rename-save').addEventListener('click', saveTitleEdit);
-    document.getElementById('conv-rename-cancel').addEventListener('click', exitTitleEdit);
-    renameInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); saveTitleEdit(); }
-        else if (e.key === 'Escape') { exitTitleEdit(); }
+    renameForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        saveTitleEdit();
     });
 
     // Fill the viewport below the navbar. Measure the navbar rather than
@@ -541,6 +605,15 @@ document.addEventListener('DOMContentLoaded', function () {
         } else if (e.key === 'ArrowDown' && caretOnLastLine()) {
             if (recallHistory(1)) e.preventDefault();
         }
+    });
+
+    // Empty-state starters send their prompt as if typed. They vanish with the
+    // rest of the placeholder on the first send.
+    messagesEl.querySelectorAll('.starter').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            input.value = btn.dataset.prompt;
+            form.requestSubmit();
+        });
     });
 
     // Render a resumed conversation's transcript (assistant turns through
