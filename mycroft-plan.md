@@ -680,6 +680,9 @@ were left in place; prune them in admin via the `source` filter.
 
 ## Phase 4: Tool calling — weather integration
 
+> **Status: ✅ Complete — 2026-10-18.** 64 targeted tests pass on the server and the
+> definition of done was validated live. As-built notes are at the end of this section.
+
 **Goal:** Mycroft can answer questions about current weather for Raleigh (and other locations if asked). This is the first "capability" — the pattern all future capabilities will follow.
 
 **What ships:**
@@ -705,10 +708,75 @@ were left in place; prune them in admin via the `source` filter.
 - Ask "what's 2+2?" → Mycroft answers directly without calling a tool
 - Conversation transcript shows the tool call and result as visible messages
 
-**Open questions for Phase 4:**
+**Open questions for Phase 4 — resolved:**
 
-- Weather provider — Open-Meteo (free, no key, good enough) vs. something you already use? I'm defaulting to Open-Meteo.
-- Location default: assume Raleigh when not specified? Recommendation: yes, since that's where you are 95% of the time.
+- Weather provider: **Open-Meteo**.
+- Location default: **Raleigh**. A blank location uses hard-coded Raleigh coordinates,
+  so the common case costs no geocode call.
+
+**As built (2026-10-18):**
+
+- **`mycroft/weather.py`**: the Open-Meteo client. `geocode()` handles "City, ST" or
+  "City, Country" by searching on the name and matching the qualifier against the
+  state, country or country code. `get_current_weather(location)` returns a trimmed,
+  labelled dict in US units: current conditions, an outlook for the next 12 hours
+  (every 2 hours), a 7-day forecast with highs, lows, rain chance and sunset, and an
+  `observed_at` stamp so a stale result in history is recognisable. Failures raise
+  `WeatherError` with a message the model can relay.
+- **`mycroft/tools.py`**: a generic registry. A `Tool` holds a name, description,
+  JSON-schema parameters, the function, a prompt hint and user-facing error types.
+  - `tool_definitions()` produces Ollama's `tools=` format.
+  - `describe_registered_tools()` builds the system prompt's tools section from the
+    hints.
+  - `run_tool()` dispatches a call and never raises. Unknown tools and failures
+    become `{"error": ...}` results. String or JSON arguments are coerced and
+    undeclared arguments are dropped.
+  - Adding a tool means writing the function and calling `register()`.
+- **Loop (`views.send_message`)**:
+  - Each round streams with `tools=`. Tool calls come back through `stream_chat`'s
+    `tool_calls_out`.
+  - When the model calls a tool, Django persists the call turn, runs each tool,
+    persists each `role='tool'` result, appends both to the messages and asks again.
+  - The loop is capped by `MYCROFT_TOOL_MAX_ROUNDS` (default 3). The final round
+    withholds tools, which forces an answer.
+  - New NDJSON frames `tool_call` and `tool_result` let the UI show them live.
+- **When tools are offered**:
+  - Only in `mode='chat'` conversations, never in learning chats.
+  - Only when the model reports the `tools` capability (`client.supports_tools`, via
+    `ollama show`; unknown counts as yes).
+  - **Only when the per-message router picks them.** `tools.select_tools` makes one
+    `complete_chat` call at temperature 0 before the reply. It sees the latest message
+    plus up to 4 earlier text turns, so "and tomorrow?" routes correctly, along with
+    each tool's `router_hint`, and returns a JSON array of tool names (usually `[]`).
+  - The router is necessary because llama3.1's Ollama template adds "respond with a
+    JSON function call" to the user turn whenever tools are present. Found in live
+    testing: "what's 2+2?" came back as `{"name": "None", "parameters": {}}`, and a
+    history question got "no function in the provided list…". No prompt wording
+    fixes this; the only fix is to not send tools.
+  - The prompt's tools section lists only the tools offered on that request. The
+    guardrails now say "real-time info you have no tool for".
+- **Text-written call safety net**: while tools are offered, a reply that starts with
+  `{` or a code fence is held back. If it parses as `{"name", "parameters"}`, a
+  registered name is run as a real call, and anything else (e.g. `"None"`) is
+  discarded and the round is re-asked without tools. Otherwise the held text is
+  released as normal output.
+- **`complete_chat` now sends `num_ctx`** to match `stream_chat`. Ollama reloads a
+  model when the context size changes, so without this the router, titles and
+  learning calls would each force a reload.
+- **Storage (migration `0010`)**:
+  - `Message.tool_calls` is JSON, `[{"name", "arguments"}]`, on the assistant turn
+    that made the call.
+  - `Message.tool_name` is set on `tool` result turns.
+  - `history_for_prompt` replays both in Ollama's format, and drops a leading orphan
+    tool result if the window cuts mid-exchange.
+- **Embeddings decision: tool turns are not embedded.** Raw JSON weather pollutes
+  recall. The final natural-language answer is still embedded, so "what was the
+  weather last week" can still match it.
+- **UI**: a tool call renders as a muted "Used get_current_weather (location: …)" line
+  with a collapsible Result (or a red Error), both live and on resume. Admin
+  transcripts show `tool_calls` and `tool_name`.
+- **Title generation** skips the empty tool-call turn.
+- **Settings**: `MYCROFT_TOOL_MAX_ROUNDS` (3), `MYCROFT_WEATHER_TIMEOUT` (10s).
 
 ---
 
@@ -756,13 +824,14 @@ Both stay resident with `OLLAMA_KEEP_ALIVE=24h` once Phase 3 ships (so retrieval
 
 ## Open architectural questions (later phases)
 
-- **Static vs. dynamic tool registration** — hard-coded in Phase 4, tool registry pattern later if needed.
+- **Static vs. dynamic tool registration**: Phase 4 shipped a small static registry
+  (`tools.register()` at import). Make it dynamic only if a need appears.
 - **Learning extraction quality** — Phase 3c (guided learning) replaced 3b; tune `build_fact_update_prompt` / `LEARNING_INSTRUCTIONS` during live validation. Embedding-based dedup remains a follow-up.
 - **Voice hardware direction** — Phase 5; depends on what we learn in Phases 1-4.
 
 ## Current status — pick up here
 
-_Last updated 2026-10-18._
+_Last updated 2026-10-18 (Phase 4)._
 
 | Phase | Status |
 |-------|--------|
@@ -771,7 +840,7 @@ _Last updated 2026-10-18._
 | 3 — Semantic memory + knowledge base (core) | ✅ Code shipped (2026-08-01); **live validation still open** |
 | 3b — Auto-learning of HouseholdFacts | ⛔ Superseded by 3c (passive extraction removed) |
 | 3c — Guided learning ("Teach Mycroft") | ✅ Code shipped (2026-10-18), 39 targeted tests pass on server; **live validation open** |
-| 4 — Tool calling (weather) | 🔲 Not started |
+| 4 — Tool calling (weather) | ✅ Complete (2026-10-18). 64 targeted tests pass on the server; DoD validated live after the tool router was added |
 | 5 — Voice I/O | 🔲 Not started, unscoped |
 
 **Next actions, in order:**
@@ -785,7 +854,7 @@ _Last updated 2026-10-18._
 2. **Live-validate + tune Phase 3 core** — run the DoD smoke tests and set the
    retrieval knobs (`MYCROFT_RETRIEVAL_MAX_DISTANCE`, `_MESSAGES`, `_KNOWLEDGE`),
    which were picked blind. See the Phase 3 "Definition of done (validate live)".
-3. **Build Phase 4 — tool calling (weather)** — the next clean feature build;
-   the `mycroft/tools.py` seam and `role='tool'` message plumbing are ready.
+3. **Phase 5 (voice I/O) needs a scoping session** before any build (hardware
+   direction, wake word vs push-to-talk).
 
-Uncommitted as of this update: Phase 3c (migration `0009`).
+Phase 4 is uncommitted as of this update.

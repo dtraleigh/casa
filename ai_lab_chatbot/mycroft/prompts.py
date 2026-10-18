@@ -2,7 +2,8 @@
 
 The final prompt is never stored — it's built fresh every request from the
 active Personality, all current HouseholdFacts, and the requesting user's UserContext,
-plus tool descriptions (empty in Phase 1) and hardcoded guardrails.
+plus descriptions of the tools offered on this request (Phase 4) and hardcoded
+guardrails.
 """
 from ai_lab_chatbot.models import Personality, HouseholdFact, UserContext
 from ai_lab_chatbot.mycroft.tools import describe_registered_tools
@@ -12,8 +13,9 @@ from ai_lab_chatbot.mycroft.tools import describe_registered_tools
 # accidentally remove them.
 STANDARD_GUARDRAILS = (
     "Never claim to have capabilities you don't have. If a question needs "
-    "real-time information you don't have (current weather, live scores, recent "
-    "news), say so plainly rather than guessing. You are a conversational "
+    "real-time information you have no tool for (live scores, recent news, "
+    "anything not covered by a tool listed above), say so plainly rather than "
+    "guessing. You are a conversational "
     "assistant, not a research agent — don't attempt long multi-step research "
     "tasks."
 )
@@ -43,19 +45,24 @@ _FALLBACK_IDENTITY = (
 )
 
 
-def build_system_prompt(user, knowledge=None, past=None, mode='chat') -> str:
+def build_system_prompt(user, knowledge=None, past=None, mode='chat',
+                        tool_names=None) -> str:
     """Assemble the system prompt for `user`. Empty sections are omitted.
 
     `knowledge` and `past` are optional semantically-retrieved context (Phase 3):
     Knowledge rows and past Message rows respectively. They ride in the system
     prompt like personality/facts — assembled fresh, never stored. `mode` is the
     conversation's mode; 'learning' adds the interviewer instructions.
+    `tool_names` are the tools offered on this request (Phase 4), and only
+    those are described, so Mycroft never claims a tool he can't call.
     """
     personality = Personality.get_active()
     # Small table, load all current facts (superseded ones are history only).
     facts = HouseholdFact.objects.filter(is_current=True)
     context = UserContext.for_user(user)
-    tool_descriptions = describe_registered_tools()
+    tool_descriptions = (
+        describe_registered_tools(tool_names) if tool_names else ''
+    )
 
     sections = []
 
@@ -164,6 +171,45 @@ def build_fact_update_prompt(question, answer, current_facts, username):
                 'Answer "Not sure, ask me later" -> {"add": [], "update": [], '
                 '"retire": []}\n\n'
                 "Reply with ONLY the JSON object — no prose, no code fences."
+            ),
+        },
+        {'role': 'user', 'content': body},
+    ]
+
+
+def build_tool_router_prompt(recent, latest, tool_hints):
+    """Messages asking whether the latest user message needs any tools.
+
+    Routing happens before the real reply because llama3.1's Ollama template
+    pushes the model toward a function call on any turn where tools are
+    offered, including "what's 2+2?". Tools are offered only when this says
+    so. `recent` is a few earlier text turns as (role, content) pairs, so a
+    follow-up like "and tomorrow?" resolves. `tool_hints` are
+    "name: when to use it" lines. The reply should be a JSON array of tool
+    names, and `tools.select_tools` parses it defensively.
+    """
+    history = "\n".join(f"{role}: {content}" for role, content in recent)
+    body = (
+        (f"Earlier in the conversation:\n{history}\n\n" if history else "")
+        + f"Latest message: {latest}"
+    )
+    return [
+        {
+            'role': 'system',
+            'content': (
+                "You decide whether answering a user's latest message needs a "
+                "live-data tool. Available tools:\n"
+                + "\n".join(f"- {h}" for h in tool_hints)
+                + "\n\nMost messages need no tool. General knowledge, history, "
+                "maths, advice, opinions and chit-chat all need none. Pick a "
+                "tool only when the answer depends on the live data it "
+                "provides.\n\n"
+                "Examples:\n"
+                '"What\'s the weather tomorrow?" -> ["get_current_weather"]\n'
+                '"Should I bring a jacket tonight?" -> ["get_current_weather"]\n'
+                '"What is 2+2?" -> []\n'
+                '"When was Raleigh founded?" -> []\n\n'
+                "Reply with ONLY a JSON array of tool names, or [] for none."
             ),
         },
         {'role': 'user', 'content': body},

@@ -176,9 +176,13 @@ class Conversation(models.Model):
 
 
 class Message(models.Model):
-    """One turn in a Conversation. Only 'user' and 'assistant' roles are stored
-    in Phase 2; the assembled system prompt is never persisted. `role` stays a
-    plain CharField so Phase 4 can add 'tool' without a migration."""
+    """One turn in a Conversation: 'user', 'assistant' or 'tool'. The assembled
+    system prompt is never persisted.
+
+    Tool use (Phase 4) is stored as ordinary turns for a full audit trail. An
+    assistant turn that asks for tools carries them in `tool_calls` (its content
+    is usually empty). Each result is a 'tool' turn whose content is the JSON
+    the tool returned and whose `tool_name` says which tool produced it."""
     id = models.BigAutoField(primary_key=True)
     conversation = models.ForeignKey(
         Conversation, on_delete=models.CASCADE, related_name='messages'
@@ -200,6 +204,11 @@ class Message(models.Model):
     # selector, so replies stay attributable when the model is switched mid-chat.
     # Blank for user turns and every pre-feature row.
     model = models.CharField(max_length=100, blank=True)
+    # Tool calls requested by an assistant turn, as [{"name", "arguments"}].
+    # Null on every other turn.
+    tool_calls = models.JSONField(null=True, blank=True)
+    # On a 'tool' turn: the tool whose result this is. Blank otherwise.
+    tool_name = models.CharField(max_length=100, blank=True)
     # nomic-embed-text vector for semantic recall (Phase 3), set best-effort just
     # after the row is written. Null for pre-feature rows and any turn whose embed
     # call failed — such rows simply aren't retrievable.

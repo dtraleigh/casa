@@ -10,8 +10,10 @@ from django.shortcuts import render, redirect
 from django.views.decorators.http import require_http_methods
 
 from ai_lab_chatbot.models import Conversation, MycroftConfig
-from ai_lab_chatbot.mycroft import memory
-from ai_lab_chatbot.mycroft.client import stream_chat, complete_chat, list_models
+from ai_lab_chatbot.mycroft import memory, tools
+from ai_lab_chatbot.mycroft.client import (
+    stream_chat, complete_chat, list_models, supports_tools,
+)
 from ai_lab_chatbot.mycroft.prompts import build_system_prompt, build_title_prompt
 
 logger = logging.getLogger(__name__)
@@ -25,7 +27,8 @@ def _frame(type_, **fields):
 def _serialize_messages(conversation):
     """The full transcript for rendering a resumed conversation in the page."""
     return [
-        {'role': m.role, 'content': m.content, 'model': m.model}
+        {'role': m.role, 'content': m.content, 'model': m.model,
+         'tool_calls': m.tool_calls, 'tool_name': m.tool_name}
         for m in conversation.messages.all()
     ]
 
@@ -197,13 +200,25 @@ def send_message(request):
     knowledge, past = memory.retrieve_memories(
         request.user, query_vec, exclude_conversation_id=conversation.id
     )
+    history = memory.history_for_prompt(conversation)
+    # Tools (Phase 4) are offered only in ordinary chats (a learning interview
+    # has no use for them), only to models that can take them, and only when
+    # the router says this message needs them. Offering tools on every turn
+    # makes llama3.1 try to call one even for "what's 2+2?".
+    tool_names = []
+    if conversation.mode == 'chat' and supports_tools(chosen_model):
+        recent = [
+            (m['role'], m['content']) for m in history[:-1]
+            if m['role'] in ('user', 'assistant') and m['content']
+        ]
+        tool_names = tools.select_tools(recent, content, model=chosen_model)
     system_prompt = build_system_prompt(
-        request.user, knowledge=knowledge, past=past, mode=conversation.mode
+        request.user, knowledge=knowledge, past=past, mode=conversation.mode,
+        tool_names=tool_names,
     )
-    messages = (
-        [{'role': 'system', 'content': system_prompt}]
-        + memory.history_for_prompt(conversation)
-    )
+    messages = [{'role': 'system', 'content': system_prompt}] + history
+    tool_defs = tools.tool_definitions(tool_names) if tool_names else None
+    max_rounds = settings.MYCROFT_TOOL_MAX_ROUNDS
 
     def token_stream():
         # Newline-delimited JSON frames. Framing lets the browser tell our
@@ -214,9 +229,69 @@ def send_message(request):
         errored = False
         stats = {}  # populated from Ollama's final chunk (token counts, timings)
         try:
-            for piece in stream_chat(messages, stats_out=stats, model=chosen_model):
-                assistant_text += piece
-                yield _frame('token', content=piece)
+            # Tool loop: while the model asks for tools, run them, persist the
+            # call + result turns, and ask again with the results appended.
+            # The last round withholds tools so the model has to answer.
+            available = tool_defs
+            for round_no in range(max_rounds + 1):
+                offered = available if round_no < max_rounds else None
+                calls = []
+                stats.clear()
+                assistant_text = ''
+                # While tools are offered, hold back a reply that starts like
+                # JSON: it may be a call written as text rather than an answer.
+                holding = bool(offered)
+                for piece in stream_chat(messages, stats_out=stats,
+                                         model=chosen_model, tools=offered,
+                                         tool_calls_out=calls):
+                    assistant_text += piece
+                    if holding:
+                        head = assistant_text.lstrip()
+                        if not head or head[0] in '{`':
+                            continue
+                        holding = False
+                        piece = assistant_text  # release what was held
+                    yield _frame('token', content=piece)
+                if holding and assistant_text and not calls:
+                    text_call = tools.parse_text_tool_call(assistant_text)
+                    if text_call is None:
+                        # Just an answer that began with a brace; send it on.
+                        yield _frame('token', content=assistant_text)
+                    elif text_call['name'] in tool_names:
+                        calls = [text_call]
+                        assistant_text = ''
+                    else:
+                        # Junk like {"name": "None"}. Drop it and answer again
+                        # without tools.
+                        logger.info("Discarded text tool call %r", assistant_text)
+                        assistant_text = ''
+                        available = None
+                        continue
+                if not calls:
+                    break
+                calls = [
+                    {'name': c['name'],
+                     'arguments': tools.coerce_arguments(c['arguments'])}
+                    for c in calls
+                ]
+                call_msg = memory.add_message(
+                    conversation, 'assistant', assistant_text,
+                    prompt_tokens=stats.get('prompt_tokens'),
+                    completion_tokens=stats.get('completion_tokens'),
+                    model=chosen_model, tool_calls=calls,
+                )
+                messages.append(memory.prompt_message(call_msg))
+                # Any text that came with the call belongs to that turn.
+                assistant_text = ''
+                for call in calls:
+                    yield _frame('tool_call', name=call['name'],
+                                 arguments=call['arguments'])
+                    result = tools.run_tool(call['name'], call['arguments'])
+                    result_msg = memory.add_message(
+                        conversation, 'tool', result, tool_name=call['name'])
+                    messages.append(memory.prompt_message(result_msg))
+                    yield _frame('tool_result', name=call['name'],
+                                 content=result)
         except Exception as exc:
             errored = True
             logger.exception("Mycroft stream failed")
@@ -278,7 +353,10 @@ def generate_title_view(request, conversation_id):
         return JsonResponse({'title': conversation.title})
 
     first_user = conversation.messages.filter(role='user').first()
-    first_assistant = conversation.messages.filter(role='assistant').first()
+    # Skip tool-call turns (Phase 4); they usually have no text to title from.
+    first_assistant = (
+        conversation.messages.filter(role='assistant').exclude(content='').first()
+    )
     if not (first_user and first_assistant):
         return JsonResponse({'title': ''})
 

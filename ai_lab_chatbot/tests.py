@@ -4,15 +4,17 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 
 from ai_lab_chatbot.models import (
     Personality, HouseholdFact, UserContext, Conversation, Message, Knowledge,
     MycroftConfig,
 )
-from ai_lab_chatbot.mycroft import memory
-from ai_lab_chatbot.mycroft.client import stream_chat, complete_chat, list_models
+from ai_lab_chatbot.mycroft import memory, tools, weather
+from ai_lab_chatbot.mycroft.client import (
+    stream_chat, complete_chat, list_models, supports_tools,
+)
 from ai_lab_chatbot.mycroft.prompts import (
     build_system_prompt, LEARNING_INSTRUCTIONS, STANDARD_GUARDRAILS,
 )
@@ -473,6 +475,9 @@ class SendMessageViewTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username='leo', password='secret')
         self.url = reverse('ai_lab_chatbot:send')
+        patcher = patch('ai_lab_chatbot.views.supports_tools', return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         Personality.objects.create(
             name='Mycroft', description='You are Mycroft.',
             instructions='', is_active=True)
@@ -489,7 +494,7 @@ class SendMessageViewTests(TestCase):
     def _stream_with_stats(tokens, stats):
         """A stream_chat stand-in that yields `tokens` and fills the caller's
         stats_out dict, mirroring a clean Ollama completion."""
-        def _side_effect(messages, stats_out=None, model=None):
+        def _side_effect(messages, stats_out=None, model=None, **kwargs):
             if stats_out is not None:
                 stats_out.update(stats)
             return iter(tokens)
@@ -1341,6 +1346,9 @@ class ModelSelectorViewTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username='leo', password='secret')
         self.client.login(username='leo', password='secret')
+        patcher = patch('ai_lab_chatbot.views.supports_tools', return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @patch('ai_lab_chatbot.views.list_models',
            return_value=['llama3.1:8b', 'mistral'])
@@ -1394,3 +1402,608 @@ class ModelSelectorViewTests(TestCase):
             mock_stream.call_args.kwargs['model'], settings.OLLAMA_CHAT_MODEL)
         conv = Conversation.objects.get(user_id=self.user.id)
         self.assertEqual(conv.model, settings.OLLAMA_CHAT_MODEL)
+
+
+# --- Phase 4: tool calling ------------------------------------------------
+
+def _forecast_payload():
+    """A trimmed Open-Meteo forecast response (US units, timezone=auto)."""
+    return {
+        'timezone': 'America/New_York',
+        'timezone_abbreviation': 'EDT',
+        'current': {
+            'time': '2026-10-18T14:00', 'temperature_2m': 71.6,
+            'apparent_temperature': 70.2, 'relative_humidity_2m': 55,
+            'precipitation': 0.0, 'weather_code': 2, 'wind_speed_10m': 8.4,
+            'wind_gusts_10m': 15.1, 'is_day': 1,
+        },
+        'hourly': {
+            'time': [f'2026-10-18T{h:02d}:00' for h in range(14, 24)]
+                    + ['2026-10-19T00:00', '2026-10-19T01:00'],
+            'temperature_2m': [72, 71, 70, 68, 65, 62, 60, 58, 57, 56, 55, 54],
+            'precipitation_probability': [0, 0, 5, 10, 20, 40, 60, 60, 30, 10, 5, 0],
+            'weather_code': [2, 2, 3, 3, 61, 61, 63, 61, 3, 3, 2, 1],
+        },
+        'daily': {
+            'time': ['2026-10-18', '2026-10-19', '2026-10-20'],
+            'weather_code': [61, 0, 3],
+            'temperature_2m_max': [74.2, 68.0, 66.5],
+            'temperature_2m_min': [54.4, 48.9, 50.0],
+            'precipitation_probability_max': [60, 0, 15],
+            'sunset': ['2026-10-18T18:42', '2026-10-19T18:41', '2026-10-20T18:40'],
+        },
+    }
+
+
+def _response(payload):
+    return SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None)
+
+
+class WeatherTests(SimpleTestCase):
+    """The Open-Meteo lookup, with HTTP mocked (no network)."""
+
+    @patch('ai_lab_chatbot.mycroft.weather.requests.get')
+    def test_blank_location_uses_raleigh_without_geocoding(self, mock_get):
+        mock_get.return_value = _response(_forecast_payload())
+        result = weather.get_current_weather('')
+
+        self.assertEqual(mock_get.call_count, 1)  # forecast only
+        url, kwargs = mock_get.call_args.args[0], mock_get.call_args.kwargs
+        self.assertEqual(url, weather.FORECAST_URL)
+        self.assertEqual(kwargs['params']['latitude'], weather.DEFAULT_PLACE.latitude)
+        self.assertEqual(kwargs['params']['temperature_unit'], 'fahrenheit')
+        self.assertEqual(result['location'], weather.DEFAULT_PLACE.name)
+
+    @patch('ai_lab_chatbot.mycroft.weather.requests.get')
+    def test_shapes_forecast(self, mock_get):
+        mock_get.return_value = _response(_forecast_payload())
+        result = weather.get_current_weather()
+
+        self.assertEqual(result['observed_at'], 'Sunday 2026-10-18 2:00 PM EDT')
+        self.assertEqual(result['current'], {
+            'conditions': 'Partly cloudy', 'temperature_f': 72,
+            'feels_like_f': 70, 'humidity_pct': 55, 'wind_mph': 8,
+            'wind_gusts_mph': 15, 'precipitation_in': 0.0, 'daytime': True,
+        })
+        # Every other hour of the 12-hour outlook.
+        self.assertEqual(len(result['next_hours']), 6)
+        self.assertEqual(result['next_hours'][0]['time'], 'Sun 2 PM')
+        self.assertEqual(result['next_hours'][3]['conditions'], 'Rain')
+        self.assertEqual(
+            [d['day'] for d in result['forecast']],
+            ['today', 'tomorrow', 'Tuesday'])
+        today = result['forecast'][0]
+        self.assertEqual(
+            (today['conditions'], today['high_f'], today['low_f'],
+             today['precipitation_chance_pct'], today['sunset']),
+            ('Light rain', 74, 54, 60, '6:42 PM'))
+
+    @patch('ai_lab_chatbot.mycroft.weather.requests.get')
+    def test_geocode_qualifier_picks_matching_state(self, mock_get):
+        mock_get.side_effect = [
+            _response({'results': [
+                {'name': 'Cary', 'admin1': 'Illinois', 'country': 'United States',
+                 'country_code': 'US', 'latitude': 42.2, 'longitude': -88.2},
+                {'name': 'Cary', 'admin1': 'North Carolina',
+                 'country': 'United States', 'country_code': 'US',
+                 'latitude': 35.79, 'longitude': -78.78},
+            ]}),
+            _response(_forecast_payload()),
+        ]
+        result = weather.get_current_weather('Cary, NC')
+
+        geo_params = mock_get.call_args_list[0].kwargs['params']
+        self.assertEqual(geo_params['name'], 'Cary')
+        self.assertEqual(
+            mock_get.call_args_list[1].kwargs['params']['latitude'], 35.79)
+        self.assertEqual(
+            result['location'], 'Cary, North Carolina, United States')
+
+    @patch('ai_lab_chatbot.mycroft.weather.requests.get')
+    def test_unknown_place_raises(self, mock_get):
+        mock_get.return_value = _response({})  # Open-Meteo omits "results"
+        with self.assertRaisesMessage(weather.WeatherError, "Atlantis"):
+            weather.get_current_weather('Atlantis')
+
+    @patch('ai_lab_chatbot.mycroft.weather.requests.get',
+           side_effect=weather.requests.ConnectionError('offline'))
+    def test_network_failure_raises_weather_error(self, mock_get):
+        with self.assertRaises(weather.WeatherError):
+            weather.get_current_weather()
+
+    @patch('ai_lab_chatbot.mycroft.weather.requests.get')
+    def test_malformed_payload_raises_weather_error(self, mock_get):
+        mock_get.return_value = _response({'current': {}})
+        with self.assertRaises(weather.WeatherError):
+            weather.get_current_weather()
+
+
+class ToolDispatchTests(SimpleTestCase):
+    """The registry and `run_tool`, using a stand-in tool."""
+
+    class Boom(Exception):
+        pass
+
+    def setUp(self):
+        self.calls = []
+
+        def fake(location=None):
+            self.calls.append(location)
+            if location == 'bad':
+                raise self.Boom('No such place.')
+            if location == 'crash':
+                raise RuntimeError('bug')
+            return {'location': location}
+
+        self.tool = tools.Tool(
+            name='fake_tool', description='A fake.',
+            parameters={'type': 'object',
+                        'properties': {'location': {'type': 'string'}}},
+            func=fake, prompt_hint='fake_tool: for tests.',
+            router_hint='fake_tool: when testing.',
+            user_errors=(self.Boom,),
+        )
+        patcher = patch.dict(tools._REGISTRY, {'fake_tool': self.tool}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_definitions_in_ollama_format(self):
+        self.assertEqual(tools.tool_definitions(), [{
+            'type': 'function',
+            'function': {'name': 'fake_tool', 'description': 'A fake.',
+                         'parameters': self.tool.parameters},
+        }])
+
+    def test_description_lists_hints(self):
+        self.assertIn('- fake_tool: for tests.', tools.describe_registered_tools())
+
+    def test_runs_tool_and_returns_json(self):
+        out = tools.run_tool('fake_tool', {'location': 'Cary'})
+        self.assertEqual(json.loads(out), {'location': 'Cary'})
+
+    def test_string_arguments_parsed_and_extras_dropped(self):
+        out = tools.run_tool('fake_tool', '{"location": "Cary", "units": "metric"}')
+        self.assertEqual(json.loads(out), {'location': 'Cary'})
+
+    def test_non_string_value_coerced_for_string_param(self):
+        tools.run_tool('fake_tool', {'location': 27601})
+        self.assertEqual(self.calls, ['27601'])
+
+    def test_unknown_tool_is_error_result(self):
+        out = json.loads(tools.run_tool('nope', {}))
+        self.assertIn('nope', out['error'])
+
+    def test_user_error_relayed(self):
+        out = json.loads(tools.run_tool('fake_tool', {'location': 'bad'}))
+        self.assertEqual(out, {'error': 'No such place.'})
+
+    def test_unexpected_error_is_generic_and_logged(self):
+        with self.assertLogs('ai_lab_chatbot.mycroft.tools', level='ERROR'):
+            out = json.loads(tools.run_tool('fake_tool', {'location': 'crash'}))
+        self.assertIn('failed unexpectedly', out['error'])
+
+
+class ToolRegistryTests(SimpleTestCase):
+    def test_weather_tool_registered(self):
+        names = [d['function']['name'] for d in tools.tool_definitions()]
+        self.assertIn('get_current_weather', names)
+        self.assertIn('get_current_weather', tools.describe_registered_tools())
+
+
+class ToolPromptTests(TestCase):
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='x')
+
+    def test_tools_section_only_when_enabled(self):
+        self.assertNotIn('get_current_weather', build_system_prompt(self.user))
+        self.assertIn(
+            'get_current_weather',
+            build_system_prompt(self.user, tool_names=['get_current_weather']))
+
+
+class StreamChatToolCallTests(SimpleTestCase):
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_tools_passed_and_calls_captured(self, mock_client):
+        call = SimpleNamespace(function=SimpleNamespace(
+            name='get_current_weather', arguments={'location': 'Cary'}))
+        mock_client.return_value.chat.return_value = iter([
+            SimpleNamespace(message=SimpleNamespace(content='', tool_calls=[call]),
+                            done=True, prompt_eval_count=1, eval_count=1,
+                            eval_duration=0, total_duration=0),
+        ])
+        defs = tools.tool_definitions()
+        calls = []
+        self.assertEqual(
+            list(stream_chat([], tools=defs, tool_calls_out=calls)), [])
+        self.assertEqual(mock_client.return_value.chat.call_args.kwargs['tools'], defs)
+        self.assertEqual(
+            calls, [{'name': 'get_current_weather', 'arguments': {'location': 'Cary'}}])
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_no_tools_kwarg_when_none(self, mock_client):
+        mock_client.return_value.chat.return_value = iter([])
+        list(stream_chat([]))
+        self.assertNotIn('tools', mock_client.return_value.chat.call_args.kwargs)
+
+
+class SupportsToolsTests(SimpleTestCase):
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_reads_capabilities(self, mock_client):
+        mock_client.return_value.show.return_value = SimpleNamespace(
+            capabilities=['completion', 'tools'])
+        self.assertTrue(supports_tools('llama3.1:8b'))
+        mock_client.return_value.show.return_value = SimpleNamespace(
+            capabilities=['completion'])
+        self.assertFalse(supports_tools('gemma'))
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_unknown_counts_as_supported(self, mock_client):
+        mock_client.return_value.show.side_effect = RuntimeError('down')
+        self.assertTrue(supports_tools('llama3.1:8b'))
+
+
+WEATHER_CALL = {'name': 'get_current_weather', 'arguments': {'location': 'Cary, NC'}}
+WEATHER_RESULT = json.dumps({'location': 'Cary', 'current': {'temperature_f': 72}})
+
+
+@patch('ai_lab_chatbot.views.supports_tools', return_value=True)
+class ToolLoopViewTests(TestCase):
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='secret')
+        self.client.login(username='leo', password='secret')
+        self.seen = []  # (messages snapshot, tools offered) per stream call
+        patcher = patch('ai_lab_chatbot.mycroft.tools.select_tools',
+                        return_value=['get_current_weather'])
+        self.select = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _script(self, rounds):
+        """A stream_chat stand-in replaying `rounds` of (tokens, tool calls)."""
+        it = iter(rounds)
+
+        def _side_effect(messages, stats_out=None, model=None, tools=None,
+                         tool_calls_out=None):
+            self.seen.append(([dict(m) for m in messages], tools))
+            tokens, calls = next(it)
+            if calls and tool_calls_out is not None:
+                tool_calls_out.extend(calls)
+            if stats_out is not None:
+                stats_out.update({'prompt_tokens': 100, 'completion_tokens': 5,
+                                  'eval_duration_ms': 1.0, 'total_duration_ms': 2.0})
+            return iter(tokens)
+        return _side_effect
+
+    def _send(self, content='Weather in Cary?', conversation_id=None):
+        resp = self.client.post(
+            reverse('ai_lab_chatbot:send'),
+            data=json.dumps({'conversation_id': conversation_id, 'content': content}),
+            content_type='application/json')
+        body = b''.join(resp.streaming_content).decode()
+        return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+    @patch('ai_lab_chatbot.mycroft.tools.run_tool', return_value=WEATHER_RESULT)
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_tool_round_then_answer(self, mock_stream, mock_run, _supports):
+        mock_stream.side_effect = self._script([
+            ([], [WEATHER_CALL]),
+            (['It is ', '72°F in Cary.'], []),
+        ])
+        frames = self._send()
+        types = [f['type'] for f in frames]
+
+        self.assertEqual(
+            types, ['tool_call', 'tool_result', 'token', 'token', 'stats', 'done'])
+        self.assertEqual(frames[0]['name'], 'get_current_weather')
+        self.assertEqual(frames[0]['arguments'], {'location': 'Cary, NC'})
+        self.assertEqual(frames[1]['content'], WEATHER_RESULT)
+        mock_run.assert_called_once_with('get_current_weather', {'location': 'Cary, NC'})
+
+        # Transcript: user, tool-call turn, tool result, answer.
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        msgs = list(conv.messages.all())
+        self.assertEqual([m.role for m in msgs], ['user', 'assistant', 'tool', 'assistant'])
+        self.assertEqual(msgs[1].tool_calls, [WEATHER_CALL])
+        self.assertEqual(msgs[1].content, '')
+        self.assertEqual(msgs[2].tool_name, 'get_current_weather')
+        self.assertEqual(msgs[2].content, WEATHER_RESULT)
+        self.assertEqual(msgs[3].content, 'It is 72°F in Cary.')
+        self.assertEqual(msgs[3].prompt_tokens, 100)
+
+        # Round 1 offers the tools; round 2 sees the call + result.
+        first_msgs, first_tools = self.seen[0]
+        self.assertTrue(first_tools)
+        self.assertIn('get_current_weather', first_msgs[0]['content'])
+        second_msgs, _ = self.seen[1]
+        self.assertEqual(second_msgs[-2]['tool_calls'], [
+            {'function': {'name': 'get_current_weather',
+                          'arguments': {'location': 'Cary, NC'}}}])
+        self.assertEqual(second_msgs[-1], {
+            'role': 'tool', 'content': WEATHER_RESULT,
+            'tool_name': 'get_current_weather'})
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_plain_answer_makes_no_tool_turns(self, mock_stream, _supports):
+        mock_stream.side_effect = self._script([(['4'], [])])
+        frames = self._send('What is 2+2?')
+        self.assertNotIn('tool_call', [f['type'] for f in frames])
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        self.assertEqual(
+            list(conv.messages.values_list('role', flat=True)), ['user', 'assistant'])
+        self.assertEqual(len(self.seen), 1)
+
+    @patch('ai_lab_chatbot.mycroft.tools.run_tool', return_value=WEATHER_RESULT)
+    @patch('ai_lab_chatbot.views.stream_chat')
+    @override_settings(MYCROFT_TOOL_MAX_ROUNDS=2)
+    def test_rounds_are_capped(self, mock_stream, mock_run, _supports):
+        mock_stream.side_effect = self._script([
+            ([], [WEATHER_CALL]), ([], [WEATHER_CALL]), (['Done.'], []),
+        ])
+        frames = self._send()
+        self.assertEqual(frames[-1]['type'], 'done')
+        self.assertEqual(mock_run.call_count, 2)
+        # The final round withholds tools so the model has to answer.
+        self.assertEqual([bool(t) for _, t in self.seen], [True, True, False])
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_no_tools_for_model_without_support(self, mock_stream, supports):
+        supports.return_value = False
+        mock_stream.side_effect = self._script([(['Hi'], [])])
+        self._send('hello')
+        messages, offered = self.seen[0]
+        self.assertIsNone(offered)
+        self.assertNotIn('get_current_weather', messages[0]['content'])
+        self.select.assert_not_called()
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_no_tools_in_learning_chat(self, mock_stream, _supports):
+        conv = Conversation.objects.create(
+            user_id=self.user.id, username='leo', mode='learning')
+        mock_stream.side_effect = self._script([(['Nice!'], [])])
+        self._send('We have a dog.', conversation_id=str(conv.id))
+        self.assertIsNone(self.seen[0][1])
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_text_with_tool_call_stays_on_call_turn(self, mock_stream, _supports):
+        mock_stream.side_effect = self._script([
+            (['Let me check.'], [WEATHER_CALL]),
+            (['Sunny.'], []),
+        ])
+        with patch('ai_lab_chatbot.mycroft.tools.run_tool', return_value='{}'):
+            frames = self._send()
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        assistants = list(conv.messages.filter(role='assistant')
+                          .values_list('content', flat=True))
+        self.assertEqual(assistants, ['Let me check.', 'Sunny.'])
+
+    @patch('ai_lab_chatbot.mycroft.tools.run_tool', return_value=WEATHER_RESULT)
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_tool_turns_not_embedded(self, mock_stream, mock_run, _supports):
+        mock_stream.side_effect = self._script([
+            ([], [WEATHER_CALL]), (['Warm.'], []),
+        ])
+        with patch('ai_lab_chatbot.mycroft.memory.embed_text',
+                   return_value=_vec([(0, 1.0)])):
+            frames = self._send()
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        embedded = {
+            (m.role, bool(m.tool_calls)): m.embedding is not None
+            for m in conv.messages.all()
+        }
+        self.assertEqual(embedded, {
+            ('user', False): True, ('assistant', True): False,
+            ('tool', False): False, ('assistant', False): True,
+        })
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_router_says_none_offers_no_tools(self, mock_stream, _supports):
+        self.select.return_value = []
+        mock_stream.side_effect = self._script([(['4'], [])])
+        self._send('What is 2+2?')
+        messages, offered = self.seen[0]
+        self.assertIsNone(offered)
+        self.assertNotIn('get_current_weather', messages[0]['content'])
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_router_gets_latest_and_earlier_text_turns(self, mock_stream, _supports):
+        conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+        memory.add_message(conv, 'user', 'Weather in Cary?')
+        memory.add_message(conv, 'assistant', '', tool_calls=[WEATHER_CALL])
+        memory.add_message(conv, 'tool', WEATHER_RESULT,
+                           tool_name='get_current_weather')
+        memory.add_message(conv, 'assistant', 'Sunny.')
+        mock_stream.side_effect = self._script([(['Rain.'], [])])
+        self._send('And tomorrow?', conversation_id=str(conv.id))
+
+        recent, latest = self.select.call_args.args
+        self.assertEqual(latest, 'And tomorrow?')
+        # Text turns only: no tool-call or tool-result turns, no current turn.
+        self.assertEqual(
+            recent, [('user', 'Weather in Cary?'), ('assistant', 'Sunny.')])
+
+    @patch('ai_lab_chatbot.mycroft.tools.run_tool', return_value=WEATHER_RESULT)
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_text_written_call_is_run(self, mock_stream, mock_run, _supports):
+        mock_stream.side_effect = self._script([
+            (['{"name": "get_current_weather", ',
+              '"parameters": {"location": "Cary, NC"}}'], []),
+            (['Sunny.'], []),
+        ])
+        frames = self._send()
+        types = [f['type'] for f in frames]
+        self.assertEqual(types[:2], ['tool_call', 'tool_result'])
+        # The JSON never reached the chat as text.
+        tokens = ''.join(f['content'] for f in frames if f['type'] == 'token')
+        self.assertEqual(tokens, 'Sunny.')
+        mock_run.assert_called_once_with(
+            'get_current_weather', {'location': 'Cary, NC'})
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        self.assertEqual(
+            list(conv.messages.values_list('role', flat=True)),
+            ['user', 'assistant', 'tool', 'assistant'])
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_junk_text_call_discarded_and_retried_without_tools(
+            self, mock_stream, _supports):
+        mock_stream.side_effect = self._script([
+            (['{"name": "None", "parameters": {}}'], []),
+            (['4'], []),
+        ])
+        with self.assertLogs('ai_lab_chatbot.views', level='INFO'):
+            frames = self._send('What is 2+2?')
+        tokens = ''.join(f['content'] for f in frames if f['type'] == 'token')
+        self.assertEqual(tokens, '4')
+        self.assertEqual([bool(t) for _, t in self.seen], [True, False])
+        conv = Conversation.objects.get(id=frames[-1]['conversation_id'])
+        self.assertEqual(
+            list(conv.messages.values_list('role', 'content')),
+            [('user', 'What is 2+2?'), ('assistant', '4')])
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_held_brace_reply_released_when_not_a_call(self, mock_stream, _supports):
+        mock_stream.side_effect = self._script([(['{', 'braces} are fun'], [])])
+        frames = self._send()
+        tokens = ''.join(f['content'] for f in frames if f['type'] == 'token')
+        self.assertEqual(tokens, '{braces} are fun')
+
+    @patch('ai_lab_chatbot.views.stream_chat')
+    def test_plain_reply_streams_when_tools_offered(self, mock_stream, _supports):
+        mock_stream.side_effect = self._script([(['It ', 'is ', 'sunny.'], [])])
+        frames = self._send()
+        tokens = [f['content'] for f in frames if f['type'] == 'token']
+        # Released on the first non-JSON piece, then streamed piece by piece.
+        self.assertEqual(tokens, ['It ', 'is ', 'sunny.'])
+
+
+class SelectToolsTests(SimpleTestCase):
+    """The per-message tool router, with the completion mocked."""
+
+    @patch('ai_lab_chatbot.mycroft.tools.complete_chat',
+           return_value='["get_current_weather"]')
+    def test_picks_named_tool_deterministically(self, mock_complete):
+        self.assertEqual(
+            tools.select_tools([], 'Jacket tonight?', model='llama3.1:8b'),
+            ['get_current_weather'])
+        kwargs = mock_complete.call_args.kwargs
+        self.assertEqual(kwargs['model'], 'llama3.1:8b')
+        self.assertEqual(kwargs['options'], {'temperature': 0})
+        system = mock_complete.call_args.args[0][0]['content']
+        self.assertIn('get_current_weather:', system)
+
+    @patch('ai_lab_chatbot.mycroft.tools.complete_chat', return_value='[]')
+    def test_empty_array_is_no_tools(self, mock_complete):
+        self.assertEqual(tools.select_tools([], 'What is 2+2?'), [])
+
+    @patch('ai_lab_chatbot.mycroft.tools.complete_chat')
+    def test_reply_parsing(self, mock_complete):
+        cases = {
+            'Sure: ["get_current_weather", "get_current_weather"]':
+                ['get_current_weather'],
+            '["launch_rockets"]': [],
+            'You need get_current_weather for that.': ['get_current_weather'],
+            'No tools needed.': [],
+            '[not json': [],
+        }
+        for raw, expected in cases.items():
+            mock_complete.return_value = raw
+            self.assertEqual(tools.select_tools([], 'x'), expected, raw)
+
+    @patch('ai_lab_chatbot.mycroft.tools.complete_chat')
+    def test_only_recent_turns_sent(self, mock_complete):
+        mock_complete.return_value = '[]'
+        recent = [('user', f'turn {i}') for i in range(10)]
+        tools.select_tools(recent, 'And tomorrow?')
+        body = mock_complete.call_args.args[0][-1]['content']
+        self.assertNotIn('turn 5', body)
+        self.assertIn('turn 6', body)
+        self.assertIn('Latest message: And tomorrow?', body)
+
+    @patch('ai_lab_chatbot.mycroft.tools.complete_chat',
+           side_effect=RuntimeError('ollama down'))
+    def test_failure_means_no_tools(self, mock_complete):
+        with self.assertLogs('ai_lab_chatbot.mycroft.tools', level='ERROR'):
+            self.assertEqual(tools.select_tools([], 'Weather?'), [])
+
+
+class ParseTextToolCallTests(SimpleTestCase):
+
+    def test_parses_call_shapes(self):
+        self.assertEqual(
+            tools.parse_text_tool_call(
+                '{"name": "get_current_weather", "parameters": {"location": "Cary"}}'),
+            {'name': 'get_current_weather', 'arguments': {'location': 'Cary'}})
+        self.assertEqual(
+            tools.parse_text_tool_call(
+                '```json\n{"name": "None", "arguments": {}}\n```'),
+            {'name': 'None', 'arguments': {}})
+
+    def test_rejects_non_calls(self):
+        for text in ['4', '{"answer": 4}', '{"name": "x", "extra": 1}',
+                     '{not json}', 'The answer is {"name": "x"}']:
+            self.assertIsNone(tools.parse_text_tool_call(text), text)
+
+
+class CompleteChatOptionsTests(SimpleTestCase):
+
+    @patch('ai_lab_chatbot.mycroft.client._client')
+    def test_num_ctx_matches_stream_and_options_merge(self, mock_client):
+        mock_client.return_value.chat.return_value = SimpleNamespace(
+            message=SimpleNamespace(content=' ok '))
+        self.assertEqual(complete_chat([], options={'temperature': 0}), 'ok')
+        self.assertEqual(
+            mock_client.return_value.chat.call_args.kwargs['options'],
+            {'num_ctx': settings.MYCROFT_NUM_CTX, 'temperature': 0})
+
+
+class ToolHistoryTests(TestCase):
+    databases = DBS
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='leo', password='secret')
+        self.conv = Conversation.objects.create(user_id=self.user.id, username='leo')
+
+    def _tool_exchange(self):
+        memory.add_message(self.conv, 'user', 'Weather?')
+        memory.add_message(self.conv, 'assistant', '', tool_calls=[WEATHER_CALL])
+        memory.add_message(self.conv, 'tool', WEATHER_RESULT,
+                           tool_name='get_current_weather')
+        memory.add_message(self.conv, 'assistant', 'Warm.')
+
+    def test_history_replays_tool_turns(self):
+        self._tool_exchange()
+        self.assertEqual(memory.history_for_prompt(self.conv), [
+            {'role': 'user', 'content': 'Weather?'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'function': {'name': 'get_current_weather',
+                              'arguments': {'location': 'Cary, NC'}}}]},
+            {'role': 'tool', 'content': WEATHER_RESULT,
+             'tool_name': 'get_current_weather'},
+            {'role': 'assistant', 'content': 'Warm.'},
+        ])
+
+    def test_window_never_starts_with_orphan_tool_result(self):
+        self._tool_exchange()
+        window = memory.history_for_prompt(self.conv, limit=2)
+        self.assertEqual(window, [{'role': 'assistant', 'content': 'Warm.'}])
+
+    def test_resume_bootstrap_includes_tool_fields(self):
+        self._tool_exchange()
+        self.client.login(username='leo', password='secret')
+        resp = self.client.get(
+            reverse('ai_lab_chatbot:conversation', args=[self.conv.id]))
+        msgs = resp.context['bootstrap']['messages']
+        self.assertEqual(msgs[1]['tool_calls'], [WEATHER_CALL])
+        self.assertEqual(msgs[2]['tool_name'], 'get_current_weather')
+
+    @patch('ai_lab_chatbot.views.complete_chat', return_value='Weather check')
+    def test_title_skips_tool_call_turn(self, mock_complete):
+        self._tool_exchange()
+        self.client.login(username='leo', password='secret')
+        self.client.post(reverse('ai_lab_chatbot:title', args=[self.conv.id]))
+        exchange = mock_complete.call_args.args[0][-1]['content']
+        self.assertIn('Assistant: Warm.', exchange)

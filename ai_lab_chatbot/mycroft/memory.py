@@ -54,17 +54,39 @@ def history_for_prompt(conversation, limit=None):
         conversation.messages.order_by('-created_at', '-id')[:limit]
     )
     recent.reverse()
-    return [{'role': m.role, 'content': m.content} for m in recent]
+    # A window that starts mid tool exchange would open with tool results whose
+    # call fell off the front, which is meaningless to the model, so drop them.
+    while recent and recent[0].role == 'tool':
+        recent.pop(0)
+    return [prompt_message(m) for m in recent]
+
+
+def prompt_message(message):
+    """One stored turn in Ollama's message format. Tool turns (Phase 4) carry
+    their calls / tool name so the model sees its earlier tool use."""
+    out = {'role': message.role, 'content': message.content}
+    if message.tool_calls:
+        out['tool_calls'] = [
+            {'function': {'name': c.get('name', ''),
+                          'arguments': c.get('arguments') or {}}}
+            for c in message.tool_calls
+        ]
+    if message.role == 'tool' and message.tool_name:
+        out['tool_name'] = message.tool_name
+    return out
 
 
 def add_message(conversation, role, content,
-                prompt_tokens=None, completion_tokens=None, model=''):
+                prompt_tokens=None, completion_tokens=None, model='',
+                tool_calls=None, tool_name=''):
     """Persist one turn. Token counts and `model` are set only on assistant turns
-    backed by a real Ollama completion; they stay null/blank otherwise."""
+    backed by a real Ollama completion; they stay null/blank otherwise.
+    `tool_calls` goes on an assistant turn that requested tools and `tool_name`
+    on a 'tool' result turn (Phase 4)."""
     return Message.objects.create(
         conversation=conversation, role=role, content=content,
         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-        model=model,
+        model=model, tool_calls=tool_calls or None, tool_name=tool_name,
     )
 
 

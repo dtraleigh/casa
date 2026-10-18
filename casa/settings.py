@@ -133,6 +133,12 @@ MYCROFT_RETRIEVAL_KNOWLEDGE = env.int("MYCROFT_RETRIEVAL_KNOWLEDGE", default=3)
 # and dropped, so weak matches don't pollute the prompt.
 MYCROFT_RETRIEVAL_MAX_DISTANCE = env.float("MYCROFT_RETRIEVAL_MAX_DISTANCE", default=0.55)
 
+# Tool calling (Phase 4). Max tool-call rounds per reply before Mycroft must
+# answer with what it has, which bounds a model that keeps calling tools.
+MYCROFT_TOOL_MAX_ROUNDS = env.int("MYCROFT_TOOL_MAX_ROUNDS", default=3)
+# Per-request timeout (seconds) for the Open-Meteo weather API.
+MYCROFT_WEATHER_TIMEOUT = env.float("MYCROFT_WEATHER_TIMEOUT", default=10)
+
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = 'login'

@@ -256,6 +256,59 @@ document.addEventListener('DOMContentLoaded', function () {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
+    // Tool use (Phase 4) is transcript-visible: each call gets a small block
+    // naming the tool and its arguments, and its result goes in a collapsible
+    // section beneath. Inserted before `beforeEl` when given (so it sits above
+    // the reply still streaming), else appended. Model/tool data only goes in
+    // via textContent; the icon is fixed markup.
+    function formatArgs(args) {
+        if (!args || typeof args !== 'object') return '';
+        const parts = Object.keys(args).map(function (k) {
+            return k + ': ' + JSON.stringify(args[k]);
+        });
+        return parts.length ? ' (' + parts.join(', ') + ')' : '';
+    }
+
+    function addToolBlock(name, args, beforeEl) {
+        const block = document.createElement('div');
+        block.className = 'tool-block small mb-3';
+        const head = document.createElement('div');
+        head.className = 'text-muted';
+        head.innerHTML = '<i class="bi bi-tools me-1" aria-hidden="true"></i>';
+        const label = document.createElement('span');
+        label.className = 'tool-label';
+        label.textContent = 'Calling ' + name + formatArgs(args) + '…';
+        head.appendChild(label);
+        block.appendChild(head);
+        block.dataset.call = name + formatArgs(args);
+        if (beforeEl) {
+            messagesEl.insertBefore(block, beforeEl);
+        } else {
+            messagesEl.appendChild(block);
+        }
+        return block;
+    }
+
+    function fillToolResult(block, content) {
+        let data = null;
+        try { data = JSON.parse(content); } catch (e) { /* show it raw */ }
+        const failed = data && typeof data === 'object' && data.error;
+        block.querySelector('.tool-label').textContent =
+            (failed ? 'Tried ' : 'Used ') + block.dataset.call;
+        const details = document.createElement('details');
+        details.className = 'ms-3';
+        const summary = document.createElement('summary');
+        summary.className = failed ? 'text-danger' : 'text-muted';
+        summary.textContent = failed ? 'Error: ' + data.error : 'Result';
+        const pre = document.createElement('pre');
+        pre.className = 'bg-light border rounded p-2 mb-0 mt-1';
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.textContent = data !== null ? JSON.stringify(data, null, 2) : content;
+        details.appendChild(summary);
+        details.appendChild(pre);
+        block.appendChild(details);
+    }
+
     // Copy to clipboard. navigator.clipboard only exists in a secure context
     // (https or localhost); over plain http on the LAN it's undefined, so fall
     // back to a hidden textarea + execCommand.
@@ -495,9 +548,20 @@ document.addEventListener('DOMContentLoaded', function () {
     if (boot.messages.length) {
         messagesEl.innerHTML = '';
         firstMessage = false;
+        const pendingTools = [];  // call blocks awaiting their result turn
         for (const m of boot.messages) {
             if (m.role === 'assistant') {
-                renderMessage(addBubble('assistant', '', m.model), m.content);
+                // A tool-call turn usually has no text, only calls.
+                if (m.content) {
+                    renderMessage(addBubble('assistant', '', m.model), m.content);
+                }
+                (m.tool_calls || []).forEach(function (c) {
+                    pendingTools.push(addToolBlock(c.name, c.arguments));
+                });
+            } else if (m.role === 'tool') {
+                const block = pendingTools.shift() ||
+                    addToolBlock(m.tool_name || 'tool', null);
+                fillToolResult(block, m.content);
             } else {
                 addBubble('user', m.content);
             }
@@ -567,8 +631,10 @@ document.addEventListener('DOMContentLoaded', function () {
         autoGrow();  // collapse back to a single row
         setBusy(true);
 
-        const assistantBubble = addBubble('assistant', '');
+        // `let`: a tool call mid-reply can move the answer to a fresh bubble.
+        let assistantBubble = addBubble('assistant', '');
         showThinking(assistantBubble);
+        const pendingTools = [];  // tool blocks awaiting their result frame
         // Pin the just-sent message near the top of the view so the reply
         // streams into the space below it. We deliberately do NOT auto-scroll
         // as tokens arrive — that would drag the view down through a long
@@ -635,6 +701,23 @@ document.addEventListener('DOMContentLoaded', function () {
                     if (frame.type === 'token') {
                         assistantText += frame.content;
                         renderMessage(assistantBubble, assistantText);
+                    } else if (frame.type === 'tool_call') {
+                        if (assistantText) {
+                            // Text came with the call: leave it in its own
+                            // bubble and continue the answer below the tool.
+                            setBubbleModel(assistantBubble, currentModel);
+                            pendingTools.push(addToolBlock(frame.name, frame.arguments));
+                            assistantBubble = addBubble('assistant', '');
+                            showThinking(assistantBubble);
+                            assistantText = '';
+                        } else {
+                            pendingTools.push(addToolBlock(
+                                frame.name, frame.arguments,
+                                assistantBubble.parentElement));
+                        }
+                    } else if (frame.type === 'tool_result') {
+                        const block = pendingTools.shift();
+                        if (block) fillToolResult(block, frame.content);
                     } else if (frame.type === 'stats') {
                         updateContextFooter(frame);
                     } else if (frame.type === 'error') {

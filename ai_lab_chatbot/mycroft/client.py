@@ -110,6 +110,16 @@ def _supports_chat(name):
     excluding the configured embed model by base name (tag-tolerant) so nothing
     regresses.
     """
+    caps = _capabilities(name)
+    if caps:
+        return 'completion' in caps
+    return _base_name(name) != _base_name(settings.OLLAMA_EMBED_MODEL)
+
+
+def _capabilities(name):
+    """The model's capability list from `ollama show` ('completion', 'tools',
+    'embedding', ...), or None if it can't be determined (older Ollama, show
+    failed, Ollama down)."""
     try:
         info = _client().show(name)
         caps = getattr(info, 'capabilities', None)
@@ -117,12 +127,19 @@ def _supports_chat(name):
             caps = info.get('capabilities')
     except Exception:
         caps = None
-    if caps:
-        return 'completion' in caps
-    return _base_name(name) != _base_name(settings.OLLAMA_EMBED_MODEL)
+    return caps or None
 
 
-def stream_chat(messages, stats_out=None, model=None):
+def supports_tools(name):
+    """Whether a chat model can take tool definitions (Phase 4). Unknown
+    capabilities count as yes. The default llama3.1 does, and if a model really
+    can't, the chat surfaces Ollama's error instead of silently dropping tools."""
+    caps = _capabilities(name or settings.OLLAMA_CHAT_MODEL)
+    return True if caps is None else 'tools' in caps
+
+
+def stream_chat(messages, stats_out=None, model=None, tools=None,
+                tool_calls_out=None):
     """Stream a chat completion from Ollama.
 
     `messages` is a list of {"role": ..., "content": ...} dicts, with the
@@ -135,17 +152,27 @@ def stream_chat(messages, stats_out=None, model=None):
     durations (converted from Ollama's nanoseconds to milliseconds). The caller
     reads it after the generator is exhausted; the yield contract (text only) is
     unchanged.
+
+    `tools` is an optional list of function schemas (Phase 4). Any tool calls
+    the model makes are appended to `tool_calls_out` as plain
+    {"name": str, "arguments": dict} dicts, which the caller also reads after
+    exhaustion. Running them is the caller's job.
     """
+    extra = {'tools': tools} if tools else {}
     stream = _client().chat(
         model=model or settings.OLLAMA_CHAT_MODEL,
         messages=messages,
         stream=True,
         options={'num_ctx': settings.MYCROFT_NUM_CTX},
+        **extra,
     )
     for chunk in stream:
         piece = chunk.message.content
         if piece:
             yield piece
+        calls = getattr(chunk.message, 'tool_calls', None)
+        if calls and tool_calls_out is not None:
+            tool_calls_out.extend(_plain_tool_call(c) for c in calls)
         if getattr(chunk, 'done', False) and stats_out is not None:
             stats_out.update({
                 'prompt_tokens': chunk.prompt_eval_count,
@@ -155,6 +182,23 @@ def stream_chat(messages, stats_out=None, model=None):
             })
     # Fires once the consumer exhausts the stream — the model is loaded by now.
     log_ps('chat stream done')
+
+
+def _plain_tool_call(call):
+    """An ollama ToolCall (or dict) as {"name", "arguments"}: JSON-friendly for
+    storage and frames."""
+    fn = getattr(call, 'function', None)
+    if fn is None and isinstance(call, dict):
+        fn = call.get('function') or {}
+    if isinstance(fn, dict):
+        name, args = fn.get('name'), fn.get('arguments')
+    else:
+        name, args = getattr(fn, 'name', None), getattr(fn, 'arguments', None)
+    # Arguments normally arrive as a mapping; a string is passed through for
+    # tools.run_tool to parse.
+    if not isinstance(args, str):
+        args = dict(args or {})
+    return {'name': name or '', 'arguments': args}
 
 
 def embed_text(text) -> list[float]:
@@ -167,18 +211,24 @@ def embed_text(text) -> list[float]:
     return list(resp.embeddings[0])
 
 
-def complete_chat(messages, model=None) -> str:
+def complete_chat(messages, model=None, options=None) -> str:
     """Non-streaming chat completion, returned as a single string.
 
     Used for short off-band calls (e.g. generating a conversation title,
-    auto-learning extraction) that shouldn't tie up the streaming path. `model`
-    overrides the configured default, so these calls can match the
-    conversation's selected model.
+    learning extraction, tool routing) that shouldn't tie up the streaming path.
+    `model` overrides the configured default, so these calls can match the
+    conversation's selected model. `options` adds Ollama options such as
+    temperature.
+
+    num_ctx always matches stream_chat. Ollama reloads a model whose context
+    size changes between requests, so a mismatch here would reload it twice per
+    message.
     """
     resp = _client().chat(
         model=model or settings.OLLAMA_CHAT_MODEL,
         messages=messages,
         stream=False,
+        options={'num_ctx': settings.MYCROFT_NUM_CTX, **(options or {})},
     )
     log_ps('chat complete done')
     return (resp.message.content or '').strip()
